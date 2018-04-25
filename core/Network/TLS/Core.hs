@@ -26,6 +26,8 @@ module Network.TLS.Core
     -- * High level API
     , sendData
     , recvData
+    , recvAuthData
+    , checkMasterSecret
     , recvData'
     ) where
 
@@ -36,6 +38,7 @@ import Network.TLS.Parameters
 import Network.TLS.IO
 import Network.TLS.Session
 import Network.TLS.Handshake
+import Network.TLS.Handshake.State
 import Network.TLS.Util (catchException)
 import qualified Network.TLS.State as S
 import qualified Data.ByteString as B
@@ -44,6 +47,8 @@ import qualified Data.ByteString.Lazy as L
 import qualified Control.Exception as E
 
 import Control.Monad.State.Strict
+import Control.Concurrent.MVar
+import Data.X509 (CertificateChain)
 
 
 -- | notify the context that this side wants to close connection.
@@ -82,11 +87,11 @@ sendData ctx dataToSend = liftIO (checkValid ctx) >> mapM_ sendDataChunk (L.toCh
 recvData :: MonadIO m => Context -> m B.ByteString
 recvData ctx = liftIO $ do
     checkValid ctx
+    b <- isEmptyMVar $ ctxLockRead ctx
     pkt <- withReadLock ctx $ recvPacket ctx
     either onError process pkt
   where onError Error_EOF = -- Not really an error.
             return B.empty
-
         onError err@(Error_Protocol (reason,fatal,desc)) =
             terminate err (if fatal then AlertLevel_Fatal else AlertLevel_Warning) desc reason
         onError err =
@@ -126,3 +131,25 @@ recvData ctx = liftIO $ do
 -- | same as recvData but returns a lazy bytestring.
 recvData' :: MonadIO m => Context -> m L.ByteString
 recvData' ctx = recvData ctx >>= return . L.fromChunks . (:[])
+
+
+checkMasterSecret :: (MonadIO m) => Int -> Context -> m ()
+checkMasterSecret i ctx = liftIO $ do
+    mhstate <- getHState ctx
+    return ()
+    {-
+    case mhstate of
+      Nothing -> putStrLn $ "No hstate " ++ show i
+      (Just st) -> case hstMasterSecret st of
+         Nothing -> putStrLn $ "No master secret " ++ show i
+         _ -> putStrLn $ "Mast secret found at " ++ show i 
+-}
+recvAuthData :: (MonadIO m) => Context -> m (CertificateChain, B.ByteString)
+recvAuthData ctx = liftIO $ do
+    x <- recvData ctx
+    mhstate <- getHState ctx
+    case (mhstate) of
+        (Nothing) -> error "EAC: no handle state found :'("
+        (Just st) -> case hstClientCertChain st of
+            Nothing -> error "EAC: No client cert chain"
+            (Just cc) -> return (cc, x)

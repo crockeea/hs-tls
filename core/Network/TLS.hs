@@ -41,6 +41,7 @@ module Network.TLS
     , SessionData(..)
     , SessionManager(..)
     , noSessionManager
+    , checkMasterSecret
 
     -- * Backend abstraction
     , Backend(..)
@@ -94,6 +95,7 @@ module Network.TLS
     -- * High level API
     , sendData
     , recvData
+    , recvAuthData
     , recvData'
 
     -- * Crypto Key

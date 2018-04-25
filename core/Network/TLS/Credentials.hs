@@ -34,7 +34,7 @@ import qualified Network.TLS.Struct    as TLS
 
 type Credential = (CertificateChain, PrivKey)
 
-newtype Credentials = Credentials [Credential]
+newtype Credentials = Credentials [Credential] deriving (Show)
 
 instance Monoid Credentials where
     mempty = Credentials []

@@ -49,6 +49,22 @@ import Network.TLS.Handshake.Common
 import Network.TLS.Handshake.Certificate
 import Network.TLS.X509
 
+checkMasterSecret :: (MonadIO m) => Int -> Context -> m ()
+checkMasterSecret i ctx = liftIO $ do
+    mhstate <- getHState ctx
+    return ()
+    {-
+    case mhstate of
+      Nothing -> putStrLn $ "No hstate " ++ show i
+      (Just st) -> do
+        case hstMasterSecret st of
+          Nothing -> putStrLn $ "No master secret " ++ show i
+          _ -> putStrLn $ "Master secret found at " ++ show i
+        case hstClientCertChain st of
+          Nothing -> putStrLn $ "No client cert chain " ++ show i
+          _ -> putStrLn $ "client cert chain found at " ++ show i
+-}
+
 -- Put the server context in handshake mode.
 --
 -- Expect to receive as first packet a client hello handshake message
@@ -89,6 +105,8 @@ handshakeServer sparams ctx = liftIO $ do
 handshakeServerWith :: ServerParams -> Context -> Handshake -> IO ()
 handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientSession ciphers compressions exts _) = do
     -- rejecting client initiated renegotiation to prevent DOS.
+    --putStrLn "Doing handshakeServerWith"
+    checkMasterSecret 10 ctx
     unless (supportedClientInitiatedRenegotiation (ctxSupported ctx)) $ do
         established <- ctxEstablished ctx
         eof <- ctxEOF ctx
@@ -101,7 +119,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
 
     -- Handle Client hello
     processHandshake ctx clientHello
-
+    checkMasterSecret 11 ctx
     -- rejecting SSL2. RFC 6176
     when (clientVersion == SSL2) $ throwCore $ Error_Protocol ("SSL 2.0 is not supported", True, ProtocolVersion)
     -- rejecting SSL3. RFC 7568
@@ -116,7 +134,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
     chosenVersion <- case findHighestVersionFrom clientVersion (supportedVersions $ ctxSupported ctx) of
                         Nothing -> throwCore $ Error_Protocol ("client version " ++ show clientVersion ++ " is not supported", True, ProtocolVersion)
                         Just v  -> return v
-
+    checkMasterSecret 12 ctx
     -- If compression is null, commonCompressions should be [0].
     when (null commonCompressions) $ throwCore $
         Error_Protocol ("no compression in common with the client", True, HandshakeFailure)
@@ -129,7 +147,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
             _                    -> Nothing
 
     extraCreds <- (onServerNameIndication $ serverHooks sparams) serverName
-
+    checkMasterSecret 13 ctx
     -- When selecting a cipher we must ensure that it is allowed for the
     -- TLS version but also that all its key-exchange requirements
     -- will be met.
@@ -203,7 +221,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
         Error_Protocol ("no cipher in common with the client", True, HandshakeFailure)
 
     let usedCipher = (onCipherChoosing $ serverHooks sparams) chosenVersion ciphersFilteredVersion
-
+    checkMasterSecret 14 ctx
     cred <- case cipherKeyExchange usedCipher of
                 CipherKeyExchange_RSA       -> return $ credentialsFindForDecrypting creds
                 CipherKeyExchange_DH_Anon   -> return $ Nothing
@@ -217,7 +235,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
                 let resume = liftIO $ sessionResume (sharedSessionManager $ ctxShared ctx) clientSessionId
                  in validateSession serverName <$> resume
             (Session Nothing)                -> return Nothing
-
+    checkMasterSecret 15 ctx
     maybe (return ()) (usingState_ ctx . setClientSNI) serverName
 
     case extensionLookup extensionID_ApplicationLayerProtocolNegotiation exts >>= extensionDecode False of
@@ -229,9 +247,9 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
     case extensionLookup extensionID_EcPointFormats exts >>= extensionDecode False of
         Just (EcPointFormatsSupported fs) -> usingState_ ctx $ setClientEcPointFormatSuggest fs
         _ -> return ()
-
+    checkMasterSecret 16 ctx
     doHandshake sparams cred ctx chosenVersion usedCipher usedCompression clientSession resumeSessionData exts
-
+    checkMasterSecret 17 ctx
   where
         commonCiphers creds sigCreds = filter ((`elem` ciphers) . cipherID) (getCiphers sparams creds sigCreds)
         commonCompressions    = compressionIntersectID (supportedCompressions $ ctxSupported ctx) compressions
@@ -258,12 +276,18 @@ doHandshake :: ServerParams -> Maybe Credential -> Context -> Version -> Cipher
 doHandshake sparams mcred ctx chosenVersion usedCipher usedCompression clientSession resumeSessionData exts = do
     case resumeSessionData of
         Nothing -> do
+            checkMasterSecret 21 ctx
             handshakeSendServerData
+            checkMasterSecret 22 ctx
             liftIO $ contextFlush ctx
+            checkMasterSecret 23 ctx
             -- Receive client info until client Finished.
             recvClientData sparams ctx
+            checkMasterSecret 24 ctx
             sendChangeCipherAndFinish ctx ServerRole
+            checkMasterSecret 25 ctx
         Just sessionData -> do
+            checkMasterSecret 31 ctx
             usingState_ ctx (setSession clientSession True)
             serverhello <- makeServerHello clientSession
             sendPacket ctx $ Handshake [serverhello]
