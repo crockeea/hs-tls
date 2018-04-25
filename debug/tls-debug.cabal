@@ -1,5 +1,5 @@
 Name:                tls-debug
-Version:             0.4.4
+Version:             0.4.5
 Description:
    A set of program to test and debug various aspect of the TLS package.
    .
@@ -18,6 +18,7 @@ Homepage:            http://github.com/vincenthz/hs-tls
 Executable           tls-stunnel
   Main-is:           Stunnel.hs
   Other-modules:     Common
+                   , Imports
   Hs-Source-Dirs:    src
   Build-Depends:     base >= 4 && < 5
                    , network
@@ -25,7 +26,7 @@ Executable           tls-stunnel
                    , x509-system >= 1.0
                    , data-default-class
                    , cryptonite >= 0.24
-                   , tls >= 1.3.0 && < 1.4
+                   , tls >= 1.3.0 && < 1.5
   if os(windows)
     Buildable:       False
   else
@@ -46,6 +47,7 @@ Executable           tls-stunnel
 
 Executable           tls-retrievecertificate
   Main-is:           RetrieveCertificate.hs
+  Other-modules:     Imports
   Hs-Source-Dirs:    src
   Build-Depends:     base >= 4 && < 5
                    , network
@@ -56,7 +58,7 @@ Executable           tls-retrievecertificate
                    , x509
                    , x509-system >= 1.4
                    , x509-validation >= 1.5.0
-                   , tls >= 1.3 && < 1.4
+                   , tls >= 1.3 && < 1.5
   Buildable:         True
   ghc-options:       -Wall -fno-warn-missing-signatures
 
@@ -64,6 +66,7 @@ Executable           tls-simpleclient
   Main-is:           SimpleClient.hs
   Other-modules:     Common
                    , HexDump
+                   , Imports
   Hs-Source-Dirs:    src
   Build-Depends:     base >= 4 && < 5
                    , network
@@ -71,7 +74,8 @@ Executable           tls-simpleclient
                    , data-default-class
                    , cryptonite >= 0.14
                    , x509-system >= 1.0
-                   , tls >= 1.3.6 && < 1.4
+                   , tls >= 1.3.6 && < 1.5
+                   , tls-session-manager
   Buildable:         True
   ghc-options:       -Wall -fno-warn-missing-signatures
 
@@ -79,6 +83,7 @@ Executable           tls-simpleserver
   Main-is:           SimpleServer.hs
   Other-modules:     Common
                    , HexDump
+                   , Imports
   Hs-Source-Dirs:    src
   Build-Depends:     base >= 4 && < 5
                    , network
@@ -87,7 +92,7 @@ Executable           tls-simpleserver
                    , cryptonite
                    , x509-store
                    , x509-system >= 1.0
-                   , tls >= 1.3 && < 1.4
+                   , tls >= 1.3 && < 1.5
   Buildable:         True
   ghc-options:       -Wall -fno-warn-missing-signatures
 

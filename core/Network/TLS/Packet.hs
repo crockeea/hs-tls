@@ -63,9 +63,6 @@ import Network.TLS.Imports
 import Network.TLS.Struct
 import Network.TLS.Wire
 import Network.TLS.Cap
-import Data.Maybe (fromJust)
-import Data.Word
-import Control.Monad
 import Data.ASN1.Types (fromASN1, toASN1)
 import Data.ASN1.Encoding (decodeASN1', encodeASN1')
 import Data.ASN1.BinaryEncoding (DER(..))
@@ -73,7 +70,6 @@ import Data.X509 (CertificateChainRaw(..), encodeCertificateChain, decodeCertifi
 import Network.TLS.Crypto
 import Network.TLS.MAC
 import Network.TLS.Cipher (CipherKeyExchangeType(..), Cipher(..))
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 import           Data.ByteArray (ByteArrayAccess)
@@ -151,7 +147,7 @@ decodeAlert = do
         (_, Nothing)     -> fail "cannot decode alert description"
 
 decodeAlerts :: ByteString -> Either TLSError [(AlertLevel, AlertDescription)]
-decodeAlerts = runGetErr "alerts" $ loop
+decodeAlerts = runGetErr "alerts" loop
   where loop = do
             r <- remaining
             if r == 0
@@ -216,7 +212,7 @@ decodeClientHello = do
     compressions <- getWords8
     r            <- remaining
     exts <- if hasHelloExtensions ver && r > 0
-            then fmap fromIntegral getWord16 >>= getExtensions
+            then fromIntegral <$> getWord16 >>= getExtensions
             else return []
     return $ ClientHello ver random session ciphers compressions exts Nothing
 
@@ -229,7 +225,7 @@ decodeServerHello = do
     compressionid <- getWord8
     r             <- remaining
     exts <- if hasHelloExtensions ver && r > 0
-            then fmap fromIntegral getWord16 >>= getExtensions
+            then fromIntegral <$> getWord16 >>= getExtensions
             else return []
     return $ ServerHello ver random session cipherid compressionid exts
 
@@ -249,8 +245,8 @@ decodeFinished = Finished <$> (remaining >>= getBytes)
 
 decodeCertRequest :: CurrentParams -> Get Handshake
 decodeCertRequest cp = do
-    certTypes <- map (fromJust . valToType . fromIntegral) <$> getWords8
-
+    mcertTypes <- map (valToType . fromIntegral) <$> getWords8
+    certTypes <- mapM (fromJustM "decodeCertRequest") mcertTypes
     sigHashAlgs <- if cParamsVersion cp >= TLS12
                        then Just <$> (getWord16 >>= getSignatureHashAlgorithms)
                        else return Nothing
@@ -384,14 +380,14 @@ encodeHandshakeContent (ServerKeyXchg skg) =
         SKX_Unparsed bytes     -> putBytes bytes
         _                      -> error ("encodeHandshakeContent: cannot handle: " ++ show skg)
 
-encodeHandshakeContent (HelloRequest) = return ()
-encodeHandshakeContent (ServerHelloDone) = return ()
+encodeHandshakeContent HelloRequest    = return ()
+encodeHandshakeContent ServerHelloDone = return ()
 
 encodeHandshakeContent (CertRequest certTypes sigAlgs certAuthorities) = do
     putWords8 (map valOfType certTypes)
     case sigAlgs of
         Nothing -> return ()
-        Just l  -> putWords16 $ map (\(x,y) -> (fromIntegral $ valOfType x) * 256 + (fromIntegral $ valOfType y)) l
+        Just l  -> putWords16 $ map (\(x,y) -> fromIntegral (valOfType x) * 256 + fromIntegral (valOfType y)) l
     encodeCertAuthorities certAuthorities
   where -- Convert a distinguished name to its DER encoding.
         encodeCA dn = return $ encodeASN1' DER (toASN1 dn []) --B.concat $ L.toChunks $ encodeDN dn
@@ -399,7 +395,7 @@ encodeHandshakeContent (CertRequest certTypes sigAlgs certAuthorities) = do
         -- Encode a list of distinguished names.
         encodeCertAuthorities certAuths = do
             enc <- mapM encodeCA certAuths
-            let totLength = sum $ map (((+) 2) . B.length) enc
+            let totLength = sum $ map ((+) 2 . B.length) enc
             putWord16 (fromIntegral totLength)
             mapM_ (\ b -> putWord16 (fromIntegral (B.length b)) >> putBytes b) enc
 
@@ -455,8 +451,8 @@ putExtensions es = putOpaque16 (runPut $ mapM_ putExtension es)
 
 getSignatureHashAlgorithm :: Get HashAndSignatureAlgorithm
 getSignatureHashAlgorithm = do
-    h <- fromJust . valToType <$> getWord8
-    s <- fromJust . valToType <$> getWord8
+    h <- (valToType <$> getWord8) >>= fromJustM "getSignatureHashAlgorithm"
+    s <- (valToType <$> getWord8) >>= fromJustM "getSignatureHashAlgorithm"
     return (h,s)
 
 putSignatureHashAlgorithm :: HashAndSignatureAlgorithm -> Put
@@ -544,11 +540,11 @@ getPRF :: Version -> Cipher -> PRF
 getPRF ver ciph
     | ver < TLS12 = prf_MD5SHA1
     | maybe True (< TLS12) (cipherMinVer ciph) = prf_SHA256
-    | otherwise = prf_TLS ver $ maybe SHA256 id $ cipherPRFHash ciph
+    | otherwise = prf_TLS ver $ fromMaybe SHA256 $ cipherPRFHash ciph
 
 generateMasterSecret_SSL :: ByteArrayAccess preMaster => preMaster -> ClientRandom -> ServerRandom -> ByteString
 generateMasterSecret_SSL premasterSecret (ClientRandom c) (ServerRandom s) =
-    B.concat $ map (computeMD5) ["A","BB","CCC"]
+    B.concat $ map computeMD5 ["A","BB","CCC"]
   where computeMD5  label = hash MD5 $ B.concat [ B.convert premasterSecret, computeSHA1 label ]
         computeSHA1 label = hash SHA1 $ B.concat [ label, B.convert premasterSecret, c, s ]
 
@@ -647,3 +643,7 @@ encodeSignedDHParams dhparams cran sran = runPut $
 encodeSignedECDHParams :: ServerECDHParams -> ClientRandom -> ServerRandom -> ByteString
 encodeSignedECDHParams dhparams cran sran = runPut $
     putClientRandom32 cran >> putServerRandom32 sran >> putServerECDHParams dhparams
+
+fromJustM :: Monad m => String -> Maybe a -> m a
+fromJustM what Nothing  = fail ("fromJust " ++ what ++ ": Nothing")
+fromJustM _    (Just x) = return x

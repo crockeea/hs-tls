@@ -26,6 +26,7 @@ module Network.TLS.Crypto
     , PrivateKey
     , SignatureParams(..)
     , findDigitalSignatureAlg
+    , findFiniteFieldGroup
     , kxEncrypt
     , kxDecrypt
     , kxSign
@@ -37,8 +38,8 @@ module Network.TLS.Crypto
 import qualified Crypto.Hash as H
 import qualified Data.ByteString as B
 import qualified Data.ByteArray as B (convert)
-import Data.ByteString (ByteString)
 import Crypto.Random
+import qualified Crypto.PubKey.DH as DH
 import qualified Crypto.PubKey.DSA as DSA
 import qualified Crypto.PubKey.ECC.ECDSA as ECDSA
 import qualified Crypto.PubKey.ECC.Prim as ECC
@@ -52,11 +53,11 @@ import Data.X509 (PrivKey(..), PubKey(..), PubKeyEC(..), SerializedPoint(..))
 import Network.TLS.Crypto.DH
 import Network.TLS.Crypto.IES
 import Network.TLS.Crypto.Types
+import Network.TLS.Imports
 
 import Data.ASN1.Types
 import Data.ASN1.Encoding
 import Data.ASN1.BinaryEncoding (DER(..), BER(..))
-import Data.List (find)
 
 {-# DEPRECATED PublicKey "use PubKey" #-}
 type PublicKey = PubKey
@@ -75,6 +76,15 @@ findDigitalSignatureAlg keyPair =
         (PubKeyDSA     _, PrivKeyDSA      _)  -> Just DSS
         --(PubKeyECDSA   _, PrivKeyECDSA    _)  -> Just ECDSA
         _                                     -> Nothing
+
+findFiniteFieldGroup :: DH.Params -> Maybe Group
+findFiniteFieldGroup params = lookup (pg params) table
+  where
+    pg (DH.Params p g _) = (p, g)
+
+    table = [ (pg prms, grp) | grp <- availableFFGroups
+                             , let Just prms = dhParamsForGroup grp
+            ]
 
 -- functions to use the hidden class.
 hashInit :: Hash -> HashContext
@@ -160,11 +170,11 @@ generalizeRSAError (Left e)  = Left (RSAError e)
 generalizeRSAError (Right x) = Right x
 
 kxEncrypt :: MonadRandom r => PublicKey -> ByteString -> r (Either KxError ByteString)
-kxEncrypt (PubKeyRSA pk) b = generalizeRSAError `fmap` RSA.encrypt pk b
+kxEncrypt (PubKeyRSA pk) b = generalizeRSAError <$> RSA.encrypt pk b
 kxEncrypt _              _ = return (Left KxUnsupported)
 
 kxDecrypt :: MonadRandom r => PrivateKey -> ByteString -> r (Either KxError ByteString)
-kxDecrypt (PrivKeyRSA pk) b = generalizeRSAError `fmap` RSA.decryptSafer pk b
+kxDecrypt (PrivKeyRSA pk) b = generalizeRSAError <$> RSA.decryptSafer pk b
 kxDecrypt _               _ = return (Left KxUnsupported)
 
 data RSAEncoding = RSApkcs1 | RSApss deriving (Show,Eq)
@@ -198,10 +208,10 @@ kxVerify (PubKeyDSA pk) DSSParams                msg signBS =
                 Right asn1 ->
                     case asn1 of
                         Start Sequence:IntVal r:IntVal s:End Sequence:_ ->
-                            Just $ DSA.Signature { DSA.sign_r = r, DSA.sign_s = s }
+                            Just DSA.Signature { DSA.sign_r = r, DSA.sign_s = s }
                         _ ->
                             Nothing
-kxVerify (PubKeyEC key) (ECDSAParams alg) msg sigBS = maybe False id $ do
+kxVerify (PubKeyEC key) (ECDSAParams alg) msg sigBS = fromMaybe False $ do
     -- get the curve name and the public key data
     (curveName, pubBS) <- case key of
             PubKeyEC_Named curveName' pub -> Just (curveName',pub)
@@ -264,9 +274,9 @@ kxSign :: MonadRandom r
        -> ByteString
        -> r (Either KxError ByteString)
 kxSign (PrivKeyRSA pk) (RSAParams hashAlg RSApkcs1) msg =
-    generalizeRSAError `fmap` rsaSignHash hashAlg pk msg
+    generalizeRSAError <$> rsaSignHash hashAlg pk msg
 kxSign (PrivKeyRSA pk) (RSAParams hashAlg RSApss) msg =
-    generalizeRSAError `fmap` rsapssSignHash hashAlg pk msg
+    generalizeRSAError <$> rsapssSignHash hashAlg pk msg
 kxSign (PrivKeyDSA pk) DSSParams           msg = do
     sign <- DSA.sign pk H.SHA1 msg
     return (Right $ encodeASN1' DER $ dsaSequence sign)

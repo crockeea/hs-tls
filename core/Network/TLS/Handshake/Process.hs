@@ -15,7 +15,6 @@ module Network.TLS.Handshake.Process
 
 import Control.Concurrent.MVar
 import Control.Monad.State.Strict (gets)
-import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 
 import Network.TLS.Types (Role(..), invertRole)
@@ -94,8 +93,12 @@ processClientKeyXchg ctx (CKX_DH clientDHValue) = do
     role <- usingState_ ctx isClientContext
 
     serverParams <- usingHState ctx getServerDHParams
+    let params = serverDHParamsToParams serverParams
+    unless (dhValid params $ dhUnwrapPublic clientDHValue) $
+        throwCore $ Error_Protocol ("invalid client public key", True, HandshakeFailure)
+
     dhpriv       <- usingHState ctx getDHPrivate
-    let premaster = dhGetShared (serverDHParamsToParams serverParams) dhpriv clientDHValue
+    let premaster = dhGetShared params dhpriv clientDHValue
     usingHState ctx $ setMasterSecretFromPre rver role premaster
 
 processClientKeyXchg ctx (CKX_ECDH bytes) = do

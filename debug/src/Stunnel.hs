@@ -1,34 +1,29 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 -- Disable this warning so we can still test deprecated functionality.
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
-import Network.BSD
-import Network.Socket hiding (Debug)
-import System.IO
-import System.IO.Error (isEOFError)
-import System.Console.GetOpt
-import System.Environment (getArgs)
-import System.Exit
-import System.X509
-import Data.X509.Validation
-
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Lazy as L
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Exception (finally, throw, SomeException(..))
 import qualified Control.Exception as E
-import Control.Monad (when, forever)
-
-import Data.Char (isDigit)
+import qualified Crypto.PubKey.DH as DH ()
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as L
 import Data.Default.Class
+import Data.X509.Validation
+import Network.Socket hiding (Debug)
+import System.Console.GetOpt
+import System.Environment (getArgs)
+import System.Exit
+import System.IO
+import System.IO.Error (isEOFError)
+import System.X509
 
 import Network.TLS
 import Network.TLS.Extra.Cipher
 
-import qualified Crypto.PubKey.DH as DH ()
-
 import Common
+import Imports
 
 loopUntil :: Monad m => m Bool -> m ()
 loopUntil f = f >>= \v -> if v then return () else loopUntil f
@@ -117,13 +112,8 @@ getAddressDescription :: Address -> IO StunnelAddr
 getAddressDescription (Address "tcp" desc) = do
     let (s, p) = break ((==) ':') desc
     when (p == "") (error $ "missing port: expecting [source]:port got " ++ show desc)
-    pn <- if and $ map isDigit $ drop 1 p
-        then return $ fromIntegral $ (read (drop 1 p) :: Int)
-        else do
-            service <- getServiceByName (drop 1 p) "tcp"
-            return $ servicePort service
-    he <- getHostByName s
-    return $ AddrSocket AF_INET (SockAddrInet pn (head $ hostAddresses he))
+    addr:_ <- getAddrInfo Nothing (Just s) (Just $ drop 1 p)
+    return $ AddrSocket (addrFamily addr) (addrAddress addr)
 
 getAddressDescription (Address "unix" desc) = do
     return $ AddrSocket AF_UNIX (SockAddrUnix desc)

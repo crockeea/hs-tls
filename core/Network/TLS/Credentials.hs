@@ -5,6 +5,7 @@
 -- Stability   : experimental
 -- Portability : unknown
 --
+{-# LANGUAGE CPP #-}
 module Network.TLS.Credentials
     ( Credential
     , Credentials(..)
@@ -19,12 +20,9 @@ module Network.TLS.Credentials
     , credentialMatchesHashSignatures
     ) where
 
-import Data.ByteString (ByteString)
-import Data.Monoid
-import Data.Maybe (catMaybes)
-import Data.List (find)
 import Network.TLS.Crypto
 import Network.TLS.X509
+import Network.TLS.Imports
 import Data.X509.File
 import Data.X509.Memory
 import Data.X509
@@ -36,9 +34,16 @@ type Credential = (CertificateChain, PrivKey)
 
 newtype Credentials = Credentials [Credential] deriving (Show)
 
+#if MIN_VERSION_base(4,9,0)
+instance Semigroup Credentials where
+    Credentials l1 <> Credentials l2 = Credentials (l1 ++ l2)
+#endif
+
 instance Monoid Credentials where
     mempty = Credentials []
+#if !(MIN_VERSION_base(4,11,0))
     mappend (Credentials l1) (Credentials l2) = Credentials (l1 ++ l2)
+#endif
 
 -- | try to create a new credential object from a public certificate
 -- and the associated private key that are stored on the filesystem
@@ -86,7 +91,7 @@ credentialLoadX509ChainFromMemory certData chainData privateData = do
             (k:_) -> Right (CertificateChain . concat $ x509 : chains, k)
 
 credentialsListSigningAlgorithms :: Credentials -> [DigitalSignatureAlg]
-credentialsListSigningAlgorithms (Credentials l) = catMaybes $ map credentialCanSign l
+credentialsListSigningAlgorithms (Credentials l) = mapMaybe credentialCanSign l
 
 credentialsFindForSigning :: DigitalSignatureAlg -> Credentials -> Maybe Credential
 credentialsFindForSigning sigAlg (Credentials l) = find forSigning l

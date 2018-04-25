@@ -28,10 +28,7 @@ import Network.TLS.Wire (encodeWord16)
 import Network.TLS.Util (bytesEq, catchException)
 import Network.TLS.Types
 import Network.TLS.X509
-import Data.Maybe
-import Data.List (find, intersect)
 import qualified Data.ByteString as B
-import Data.ByteString.Char8 ()
 
 import Control.Monad.State.Strict
 import Control.Exception (SomeException)
@@ -66,7 +63,7 @@ handshakeClient cparams ctx = do
         getExtensions = sequence [sniExtension
                                  ,secureReneg
                                  ,alpnExtension
-                                 ,curveExtension
+                                 ,groupExtension
                                  ,ecPointExtension
                                  --,sessionTicketExtension
                                  ,signatureAlgExtension
@@ -93,7 +90,7 @@ handshakeClient cparams ctx = do
                                  return $ Just $ toExtensionRaw $ ServerName [ServerNameHostName sni]
                          else return Nothing
 
-        curveExtension = return $ Just $ toExtensionRaw $ NegotiatedGroups ((supportedGroups $ ctxSupported ctx) `intersect` availableGroups)
+        groupExtension = return $ Just $ toExtensionRaw $ NegotiatedGroups (supportedGroups $ ctxSupported ctx)
         ecPointExtension = return $ Just $ toExtensionRaw $ EcPointFormatsSupported [EcPointFormat_Uncompressed]
                                 --[EcPointFormat_Uncompressed,EcPointFormat_AnsiX962_compressed_prime,EcPointFormat_AnsiX962_compressed_char2]
         --heartbeatExtension = return $ Just $ toExtensionRaw $ HeartBeat $ HeartBeat_PeerAllowedToSend
@@ -102,8 +99,8 @@ handshakeClient cparams ctx = do
         signatureAlgExtension = return $ Just $ toExtensionRaw $ SignatureAlgorithms $ supportedHashSignatures $ clientSupported cparams
 
         sendClientHello = do
-            crand <- getStateRNG ctx 32 >>= return . ClientRandom
-            let clientSession = Session . maybe Nothing (Just . fst) $ clientWantSessionResume cparams
+            crand <- ClientRandom <$> getStateRNG ctx 32
+            let clientSession = Session . (fst <$>) $ clientWantSessionResume cparams
                 highestVer = maximum $ supportedVersions $ ctxSupported ctx
             extensions <- catMaybes <$> getExtensions
             startHandshake ctx highestVer crand
@@ -193,11 +190,30 @@ sendClientData cparams ctx = sendCertificate >> sendClientKeyXchg >> sendCertifi
           where getCKX_DHE = do
                     xver <- usingState_ ctx getVersion
                     serverParams <- usingHState ctx getServerDHParams
-                    (clientDHPriv, clientDHPub) <- generateDHE ctx (serverDHParamsToParams serverParams)
 
-                    let premaster = dhGetShared (serverDHParamsToParams serverParams)
-                                                clientDHPriv
-                                                (serverDHParamsToPublic serverParams)
+                    let params  = serverDHParamsToParams serverParams
+                        ffGroup = findFiniteFieldGroup params
+                        srvpub  = serverDHParamsToPublic serverParams
+
+                    (clientDHPub, premaster) <-
+                        case ffGroup of
+                             Nothing  -> do
+                                 groupUsage <- (onCustomFFDHEGroup $ clientHooks cparams) params srvpub `catchException`
+                                                   throwMiscErrorOnException "custom group callback failed"
+                                 case groupUsage of
+                                     GroupUsageInsecure           -> throwCore $ Error_Protocol ("FFDHE group is not secure enough", True, InsufficientSecurity)
+                                     GroupUsageUnsupported reason -> throwCore $ Error_Protocol ("unsupported FFDHE group: " ++ reason, True, HandshakeFailure)
+                                     GroupUsageInvalidPublic      -> throwCore $ Error_Protocol ("invalid server public key", True, HandshakeFailure)
+                                     GroupUsageValid              -> do
+                                         (clientDHPriv, clientDHPub) <- generateDHE ctx params
+                                         let premaster = dhGetShared params clientDHPriv srvpub
+                                         return (clientDHPub, premaster)
+                             Just grp -> do
+                                 dhePair <- generateFFDHEShared ctx grp srvpub
+                                 case dhePair of
+                                     Nothing   -> throwCore $ Error_Protocol ("invalid server public key", True, HandshakeFailure)
+                                     Just pair -> return pair
+
                     usingHState ctx $ setMasterSecretFromPre xver ClientRole premaster
 
                     return $ CKX_DH clientDHPub
@@ -227,33 +243,30 @@ sendClientData cparams ctx = sendCertificate >> sendClientKeyXchg >> sendCertifi
             -- Only send a certificate verify message when we
             -- have sent a non-empty list of certificates.
             --
-            certSent <- usingHState ctx $ getClientCertSent
-            case certSent of
-                True -> do
-                    sigAlg <- getLocalSignatureAlg
+            certSent <- usingHState ctx getClientCertSent
+            when certSent $ do
+                sigAlg <- getLocalSignatureAlg
 
-                    mhashSig <- case usedVersion of
-                        TLS12 -> do
-                            Just (_, Just hashSigs, _) <- usingHState ctx $ getClientCertRequest
-                            -- The values in the "signature_algorithms" extension
-                            -- are in descending order of preference.
-                            -- However here the algorithms are selected according
-                            -- to client preference in 'supportedHashSignatures'.
-                            let suppHashSigs = supportedHashSignatures $ ctxSupported ctx
-                                matchHashSigs = filter (sigAlg `signatureCompatible`) suppHashSigs
-                                hashSigs' = filter (\ a -> a `elem` hashSigs) matchHashSigs
+                mhashSig <- case usedVersion of
+                    TLS12 -> do
+                        Just (_, Just hashSigs, _) <- usingHState ctx getClientCertRequest
+                        -- The values in the "signature_algorithms" extension
+                        -- are in descending order of preference.
+                        -- However here the algorithms are selected according
+                        -- to client preference in 'supportedHashSignatures'.
+                        let suppHashSigs = supportedHashSignatures $ ctxSupported ctx
+                            matchHashSigs = filter (sigAlg `signatureCompatible`) suppHashSigs
+                            hashSigs' = filter (`elem` hashSigs) matchHashSigs
 
-                            when (null hashSigs') $
-                                throwCore $ Error_Protocol ("no " ++ show sigAlg ++ " hash algorithm in common with the server", True, HandshakeFailure)
-                            return $ Just $ head hashSigs'
-                        _     -> return Nothing
+                        when (null hashSigs') $
+                            throwCore $ Error_Protocol ("no " ++ show sigAlg ++ " hash algorithm in common with the server", True, HandshakeFailure)
+                        return $ Just $ head hashSigs'
+                    _     -> return Nothing
 
-                    -- Fetch all handshake messages up to now.
-                    msgs   <- usingHState ctx $ B.concat <$> getHandshakeMessages
-                    sigDig <- createCertificateVerify ctx usedVersion sigAlg mhashSig msgs
-                    sendPacket ctx $ Handshake [CertVerify sigDig]
-
-                _ -> return ()
+                -- Fetch all handshake messages up to now.
+                msgs   <- usingHState ctx $ B.concat <$> getHandshakeMessages
+                sigDig <- createCertificateVerify ctx usedVersion sigAlg mhashSig msgs
+                sendPacket ctx $ Handshake [CertVerify sigDig]
 
         getLocalSignatureAlg = do
             pk <- usingHState ctx getLocalPrivateKey
@@ -285,7 +298,7 @@ throwMiscErrorOnException msg e =
 onServerHello :: Context -> ClientParams -> [ExtensionID] -> Handshake -> IO (RecvState IO)
 onServerHello ctx cparams sentExts (ServerHello rver serverRan serverSession cipher compression exts) = do
     when (rver == SSL2) $ throwCore $ Error_Protocol ("ssl2 is not supported", True, ProtocolVersion)
-    case find ((==) rver) (supportedVersions $ ctxSupported ctx) of
+    case find (== rver) (supportedVersions $ ctxSupported ctx) of
         Nothing -> throwCore $ Error_Protocol ("server version " ++ show rver ++ " is not supported", True, ProtocolVersion)
         Just _  -> return ()
     -- find the compression and cipher methods that the server want to use.
@@ -298,7 +311,7 @@ onServerHello ctx cparams sentExts (ServerHello rver serverRan serverSession cip
 
     -- intersect sent extensions in client and the received extensions from server.
     -- if server returns extensions that we didn't request, fail.
-    when (not $ null $ filter (not . flip elem sentExts . (\(ExtensionRaw i _) -> i)) exts) $
+    unless (null $ filter (not . flip elem sentExts . (\(ExtensionRaw i _) -> i)) exts) $
         throwCore $ Error_Protocol ("spurious extensions received", True, UnsupportedExtension)
 
     let resumingSession =
@@ -311,11 +324,11 @@ onServerHello ctx cparams sentExts (ServerHello rver serverRan serverSession cip
         setVersion rver
     usingHState ctx $ setServerHelloParameters rver serverRan cipherAlg compressAlg
 
-    case extensionDecode False `fmap` (extensionLookup extensionID_ApplicationLayerProtocolNegotiation exts) of
+    case extensionDecode False <$> extensionLookup extensionID_ApplicationLayerProtocolNegotiation exts of
         Just (Just (ApplicationLayerProtocolNegotiation [proto])) -> usingState_ ctx $ do
             mprotos <- getClientALPNSuggest
             case mprotos of
-                Just protos -> when (elem proto protos) $ do
+                Just protos -> when (proto `elem` protos) $ do
                     setExtensionALPN True
                     setNegotiatedProtocol proto
                 _ -> return ()
@@ -331,7 +344,7 @@ onServerHello _ _ _ p = unexpected (show p) (Just "server hello")
 processCertificate :: ClientParams -> Context -> Handshake -> IO (RecvState IO)
 processCertificate cparams ctx (Certificates certs) = do
     -- run certificate recv hook
-    ctxWithHooks ctx (\hooks -> hookRecvCertificates hooks $ certs)
+    ctxWithHooks ctx (\hooks -> hookRecvCertificates hooks certs)
     -- then run certificate validation
     usage <- catchException (wrapCertificateChecks <$> checkCert) rejectOnException
     case usage of
@@ -376,15 +389,15 @@ processServerKeyExchange ctx (ServerKeyXchg origSkx) = do
                     -- we need to resolve the result. and recall processWithCipher ..
                 (c,_)           -> throwCore $ Error_Protocol ("unknown server key exchange received, expecting: " ++ show c, True, HandshakeFailure)
         doDHESignature dhparams signature signatureType = do
-            -- TODO verify DHParams
+            -- FIXME verify if FF group is one of supported groups
             verified <- digitallySignDHParamsVerify ctx dhparams signatureType signature
-            when (not verified) $ throwCore $ Error_Protocol ("bad " ++ show signatureType ++ " signature for dhparams " ++ show dhparams, True, HandshakeFailure)
+            unless verified $ throwCore $ Error_Protocol ("bad " ++ show signatureType ++ " signature for dhparams " ++ show dhparams, True, HandshakeFailure)
             usingHState ctx $ setServerDHParams dhparams
 
         doECDHESignature ecdhparams signature signatureType = do
-            -- TODO verify DHParams
+            -- FIXME verify if EC group is one of supported groups
             verified <- digitallySignECDHParamsVerify ctx ecdhparams signatureType signature
-            when (not verified) $ throwCore $ Error_Protocol ("bad " ++ show signatureType ++ " signature for ecdhparams", True, HandshakeFailure)
+            unless verified $ throwCore $ Error_Protocol ("bad " ++ show signatureType ++ " signature for ecdhparams", True, HandshakeFailure)
             usingHState ctx $ setServerECDHParams ecdhparams
 
 processServerKeyExchange ctx p = processCertificateRequest ctx p

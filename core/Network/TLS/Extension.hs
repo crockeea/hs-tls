@@ -37,11 +37,6 @@ module Network.TLS.Extension
     , SignatureAlgorithms(..)
     ) where
 
-import Control.Monad
-
-import Data.Word
-import Data.Maybe (fromMaybe, catMaybes)
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 
@@ -157,8 +152,7 @@ class Extension a where
 -- | Server Name extension including the name type and the associated name.
 -- the associated name decoding is dependant of its name type.
 -- name type = 0 : hostname
-data ServerName = ServerName [ServerNameType]
-    deriving (Show,Eq)
+newtype ServerName = ServerName [ServerNameType] deriving (Show,Eq)
 
 data ServerNameType = ServerNameHostName HostName
                     | ServerNameOther    (Word8, ByteString)
@@ -169,7 +163,7 @@ instance Extension ServerName where
     extensionEncode (ServerName l) = runPut $ putOpaque16 (runPut $ mapM_ encodeNameType l)
         where encodeNameType (ServerNameHostName hn)       = putWord8 0  >> putOpaque16 (BC.pack hn) -- FIXME: should be puny code conversion
               encodeNameType (ServerNameOther (nt,opaque)) = putWord8 nt >> putBytes opaque
-    extensionDecode _ = runGetMaybe (getWord16 >>= \len -> getList (fromIntegral len) getServerName >>= return . ServerName)
+    extensionDecode _ = runGetMaybe (getWord16 >>= \len -> ServerName <$> getList (fromIntegral len) getServerName)
         where getServerName = do
                   ty    <- getWord8
                   sname <- getOpaque16
@@ -178,8 +172,7 @@ instance Extension ServerName where
                       _ -> ServerNameOther (ty, sname))
 
 -- | Max fragment extension with length from 512 bytes to 4096 bytes
-data MaxFragmentLength = MaxFragmentLength MaxFragmentEnum
-    deriving (Show,Eq)
+newtype MaxFragmentLength = MaxFragmentLength MaxFragmentEnum deriving (Show,Eq)
 data MaxFragmentEnum = MaxFragment512 | MaxFragment1024 | MaxFragment2048 | MaxFragment4096
     deriving (Show,Eq)
 
@@ -213,8 +206,7 @@ instance Extension SecureRenegotiation where
            else return $ SecureRenegotiation opaque Nothing
 
 -- | Application Layer Protocol Negotiation (ALPN)
-data ApplicationLayerProtocolNegotiation = ApplicationLayerProtocolNegotiation [ByteString]
-    deriving (Show,Eq)
+newtype ApplicationLayerProtocolNegotiation = ApplicationLayerProtocolNegotiation [ByteString] deriving (Show,Eq)
 
 instance Extension ApplicationLayerProtocolNegotiation where
     extensionID _ = extensionID_ApplicationLayerProtocolNegotiation
@@ -231,17 +223,15 @@ instance Extension ApplicationLayerProtocolNegotiation where
                      _ -> (:) <$> getOpaque8 <*> getALPN'
 
 
-data NegotiatedGroups = NegotiatedGroups [Group]
-    deriving (Show,Eq)
+newtype NegotiatedGroups = NegotiatedGroups [Group] deriving (Show,Eq)
 
 -- on decode, filter all unknown curves
 instance Extension NegotiatedGroups where
     extensionID _ = extensionID_NegotiatedGroups
     extensionEncode (NegotiatedGroups groups) = runPut $ putWords16 $ map fromEnumSafe16 groups
-    extensionDecode _ = runGetMaybe (NegotiatedGroups . catMaybes . map toEnumSafe16 <$> getWords16)
+    extensionDecode _ = runGetMaybe (NegotiatedGroups . mapMaybe toEnumSafe16 <$> getWords16)
 
-data EcPointFormatsSupported = EcPointFormatsSupported [EcPointFormat]
-    deriving (Show,Eq)
+newtype EcPointFormatsSupported = EcPointFormatsSupported [EcPointFormat] deriving (Show,Eq)
 
 data EcPointFormat =
       EcPointFormat_Uncompressed
@@ -263,18 +253,17 @@ instance EnumSafe8 EcPointFormat where
 instance Extension EcPointFormatsSupported where
     extensionID _ = extensionID_EcPointFormats
     extensionEncode (EcPointFormatsSupported formats) = runPut $ putWords8 $ map fromEnumSafe8 formats
-    extensionDecode _ = runGetMaybe (EcPointFormatsSupported . catMaybes . map toEnumSafe8 <$> getWords8)
+    extensionDecode _ = runGetMaybe (EcPointFormatsSupported . mapMaybe toEnumSafe8 <$> getWords8)
 
 data SessionTicket = SessionTicket
     deriving (Show,Eq)
 
 instance Extension SessionTicket where
     extensionID _ = extensionID_SessionTicket
-    extensionEncode (SessionTicket {}) = runPut $ return ()
+    extensionEncode SessionTicket{} = runPut $ return ()
     extensionDecode _ = runGetMaybe (return SessionTicket)
 
-data HeartBeat = HeartBeat HeartBeatMode
-    deriving (Show,Eq)
+newtype HeartBeat = HeartBeat HeartBeatMode deriving (Show,Eq)
 
 data HeartBeatMode =
       HeartBeat_PeerAllowedToSend
@@ -297,8 +286,7 @@ instance Extension HeartBeat where
             Just (Just mode) -> Just $ HeartBeat mode
             _                -> Nothing
 
-data SignatureAlgorithms = SignatureAlgorithms [HashAndSignatureAlgorithm]
-    deriving (Show,Eq)
+newtype SignatureAlgorithms = SignatureAlgorithms [HashAndSignatureAlgorithm] deriving (Show,Eq)
 
 instance Extension SignatureAlgorithms where
     extensionID _ = extensionID_SignatureAlgorithms

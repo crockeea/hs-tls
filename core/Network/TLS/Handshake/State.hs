@@ -57,11 +57,10 @@ import Network.TLS.Crypto
 import Network.TLS.Cipher
 import Network.TLS.Compression
 import Network.TLS.Types
-import Control.Applicative (Applicative, (<$>))
+import Network.TLS.Imports
 import Control.Monad.State.Strict
 import Data.X509 (CertificateChain)
 import Data.ByteArray (ByteArrayAccess)
-import Data.ByteString (ByteString)
 
 data HandshakeKeyState = HandshakeKeyState
     { hksRemotePublicKey :: !(Maybe PubKey)
@@ -69,7 +68,7 @@ data HandshakeKeyState = HandshakeKeyState
     } deriving (Show)
 
 data HandshakeState = HandshakeState
-    { hstClientVersion       :: !(Version)
+    { hstClientVersion       :: !Version
     , hstClientRandom        :: !ClientRandom
     , hstServerRandom        :: !(Maybe ServerRandom)
     , hstMasterSecret        :: !(Maybe ByteString)
@@ -99,7 +98,7 @@ newtype HandshakeM a = HandshakeM { runHandshakeM :: State HandshakeState a }
 
 instance MonadState HandshakeState HandshakeM where
     put x = HandshakeM (put x)
-    get   = HandshakeM (get)
+    get   = HandshakeM get
 #if MIN_VERSION_mtl(2,1,0)
     state f = HandshakeM (state f)
 #endif

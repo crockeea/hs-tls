@@ -65,7 +65,7 @@ import Network.TLS.Hooks
 import Network.TLS.Record.State
 import Network.TLS.Parameters
 import Network.TLS.Measurement
-import Data.ByteString (ByteString)
+import Network.TLS.Imports
 import qualified Data.ByteString as B
 
 import Control.Concurrent.MVar
@@ -195,7 +195,7 @@ usingHState :: Context -> HandshakeM a -> IO a
 usingHState ctx f = liftIO $ modifyMVar (ctxHandshake ctx) $ \mst ->
     case mst of
         Nothing -> throwCore $ Error_Misc "missing handshake"
-        Just st -> return $ swap (Just `fmap` runHandshake st f)
+        Just st -> return $ swap (Just <$> runHandshake st f)
 
 getHState :: Context -> IO (Maybe HandshakeState)
 getHState ctx = liftIO $ readMVar (ctxHandshake ctx)

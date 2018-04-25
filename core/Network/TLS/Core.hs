@@ -42,7 +42,6 @@ import Network.TLS.Handshake.State
 import Network.TLS.Util (catchException)
 import qualified Network.TLS.State as S
 import qualified Data.ByteString as B
-import Data.ByteString.Char8 ()
 import qualified Data.ByteString.Lazy as L
 import qualified Control.Exception as E
 
@@ -57,7 +56,9 @@ import Data.X509 (CertificateChain)
 --
 -- this doesn't actually close the handle
 bye :: MonadIO m => Context -> m ()
-bye ctx = sendPacket ctx $ Alert [(AlertLevel_Warning, CloseNotify)]
+bye ctx = do
+  eof <- liftIO $ ctxEOF ctx
+  unless eof $ sendPacket ctx $ Alert [(AlertLevel_Warning, CloseNotify)]
 
 -- | If the ALPN extensions have been used, this will
 -- return get the protocol agreed upon.
@@ -97,7 +98,7 @@ recvData ctx = liftIO $ do
         onError err =
             terminate err AlertLevel_Fatal InternalError (show err)
 
-        process (Handshake [ch@(ClientHello {})]) =
+        process (Handshake [ch@ClientHello{}]) =
             handshakeWith ctx ch >> recvData ctx
         process (Handshake [hr@HelloRequest]) =
             handshakeWith ctx hr >> recvData ctx

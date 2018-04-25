@@ -22,7 +22,11 @@ module Network.TLS.Extra.Cipher
     , cipher_AES256_SHA1
     , cipher_AES128_SHA256
     , cipher_AES256_SHA256
+    , cipher_AES128CCM_SHA256
+    , cipher_AES128CCM8_SHA256
     , cipher_AES128GCM_SHA256
+    , cipher_AES256CCM_SHA256
+    , cipher_AES256CCM8_SHA256
     , cipher_AES256GCM_SHA384
     , cipher_DHE_RSA_AES128_SHA1
     , cipher_DHE_RSA_AES256_SHA1
@@ -30,7 +34,11 @@ module Network.TLS.Extra.Cipher
     , cipher_DHE_RSA_AES256_SHA256
     , cipher_DHE_DSS_AES128_SHA1
     , cipher_DHE_DSS_AES256_SHA1
+    , cipher_DHE_RSA_AES128CCM_SHA256
+    , cipher_DHE_RSA_AES128CCM8_SHA256
     , cipher_DHE_RSA_AES128GCM_SHA256
+    , cipher_DHE_RSA_AES256CCM_SHA256
+    , cipher_DHE_RSA_AES256CCM8_SHA256
     , cipher_DHE_RSA_AES256GCM_SHA384
     , cipher_ECDHE_RSA_AES128GCM_SHA256
     , cipher_ECDHE_RSA_AES256GCM_SHA384
@@ -42,7 +50,11 @@ module Network.TLS.Extra.Cipher
     , cipher_ECDHE_ECDSA_AES256CBC_SHA
     , cipher_ECDHE_ECDSA_AES128CBC_SHA256
     , cipher_ECDHE_ECDSA_AES256CBC_SHA384
+    , cipher_ECDHE_ECDSA_AES128CCM_SHA256
+    , cipher_ECDHE_ECDSA_AES128CCM8_SHA256
     , cipher_ECDHE_ECDSA_AES128GCM_SHA256
+    , cipher_ECDHE_ECDSA_AES256CCM_SHA256
+    , cipher_ECDHE_ECDSA_AES256CCM8_SHA256
     , cipher_ECDHE_ECDSA_AES256GCM_SHA384
     -- * obsolete and non-standard ciphers
     , cipher_RSA_3DES_EDE_CBC_SHA1
@@ -56,6 +68,7 @@ import qualified Data.ByteString as B
 
 import Network.TLS.Types (Version(..))
 import Network.TLS.Cipher
+import Network.TLS.Imports
 import Data.Tuple (swap)
 
 import Crypto.Cipher.AES
@@ -83,6 +96,34 @@ aes256cbc BulkDecrypt key =
     let ctx = noFail (cipherInit key) :: AES256
      in (\iv input -> let output = cbcDecrypt ctx (makeIV_ iv) input in (output, takelast 16 input))
 
+aes128ccm :: BulkDirection -> BulkKey -> BulkAEAD
+aes128ccm BulkEncrypt key =
+    let ctx = noFail (cipherInit key) :: AES128
+     in (\nonce d ad ->
+            let mode = AEAD_CCM (B.length d) CCM_M16 CCM_L3
+                aeadIni = noFail (aeadInit mode ctx nonce)
+             in swap $ aeadSimpleEncrypt aeadIni ad d 16)
+aes128ccm BulkDecrypt key =
+    let ctx = noFail (cipherInit key) :: AES128
+     in (\nonce d ad ->
+            let mode = AEAD_CCM (B.length d) CCM_M16 CCM_L3
+                aeadIni = noFail (aeadInit mode ctx nonce)
+             in simpleDecrypt aeadIni ad d 16)
+
+aes128ccm8 :: BulkDirection -> BulkKey -> BulkAEAD
+aes128ccm8 BulkEncrypt key =
+    let ctx = noFail (cipherInit key) :: AES128
+     in (\nonce d ad ->
+            let mode = AEAD_CCM (B.length d) CCM_M8 CCM_L3
+                aeadIni = noFail (aeadInit mode ctx nonce)
+             in swap $ aeadSimpleEncrypt aeadIni ad d 8)
+aes128ccm8 BulkDecrypt key =
+    let ctx = noFail (cipherInit key) :: AES128
+     in (\nonce d ad ->
+            let mode = AEAD_CCM (B.length d) CCM_M8 CCM_L3
+                aeadIni = noFail (aeadInit mode ctx nonce)
+             in simpleDecrypt aeadIni ad d 8)
+
 aes128gcm :: BulkDirection -> BulkKey -> BulkAEAD
 aes128gcm BulkEncrypt key =
     let ctx = noFail (cipherInit key) :: AES128
@@ -93,13 +134,35 @@ aes128gcm BulkDecrypt key =
     let ctx = noFail (cipherInit key) :: AES128
      in (\nonce d ad ->
             let aeadIni = noFail (aeadInit AEAD_GCM ctx nonce)
-             in simpleDecrypt aeadIni ad d)
-  where
-    simpleDecrypt aeadIni header input = (output, tag)
-      where
-            aead                = aeadAppendHeader aeadIni header
-            (output, aeadFinal) = aeadDecrypt aead input
-            tag                 = aeadFinalize aeadFinal 16
+             in simpleDecrypt aeadIni ad d 16)
+
+aes256ccm :: BulkDirection -> BulkKey -> BulkAEAD
+aes256ccm BulkEncrypt key =
+    let ctx = noFail (cipherInit key) :: AES256
+     in (\nonce d ad ->
+            let mode = AEAD_CCM (B.length d) CCM_M16 CCM_L3
+                aeadIni = noFail (aeadInit mode ctx nonce)
+             in swap $ aeadSimpleEncrypt aeadIni ad d 16)
+aes256ccm BulkDecrypt key =
+    let ctx = noFail (cipherInit key) :: AES256
+     in (\nonce d ad ->
+            let mode = AEAD_CCM (B.length d) CCM_M16 CCM_L3
+                aeadIni = noFail (aeadInit mode ctx nonce)
+             in simpleDecrypt aeadIni ad d 16)
+
+aes256ccm8 :: BulkDirection -> BulkKey -> BulkAEAD
+aes256ccm8 BulkEncrypt key =
+    let ctx = noFail (cipherInit key) :: AES256
+     in (\nonce d ad ->
+            let mode = AEAD_CCM (B.length d) CCM_M8 CCM_L3
+                aeadIni = noFail (aeadInit mode ctx nonce)
+             in swap $ aeadSimpleEncrypt aeadIni ad d 8)
+aes256ccm8 BulkDecrypt key =
+    let ctx = noFail (cipherInit key) :: AES256
+     in (\nonce d ad ->
+            let mode = AEAD_CCM (B.length d) CCM_M8 CCM_L3
+                aeadIni = noFail (aeadInit mode ctx nonce)
+             in simpleDecrypt aeadIni ad d 8)
 
 aes256gcm :: BulkDirection -> BulkKey -> BulkAEAD
 aes256gcm BulkEncrypt key =
@@ -111,19 +174,20 @@ aes256gcm BulkDecrypt key =
     let ctx = noFail (cipherInit key) :: AES256
      in (\nonce d ad ->
             let aeadIni = noFail (aeadInit AEAD_GCM ctx nonce)
-             in simpleDecrypt aeadIni ad d)
+             in simpleDecrypt aeadIni ad d 16)
+
+simpleDecrypt :: AEAD cipher -> B.ByteString -> B.ByteString -> Int -> (B.ByteString, AuthTag)
+simpleDecrypt aeadIni header input taglen = (output, tag)
   where
-    simpleDecrypt aeadIni header input = (output, tag)
-      where
-            aead                = aeadAppendHeader aeadIni header
-            (output, aeadFinal) = aeadDecrypt aead input
-            tag                 = aeadFinalize aeadFinal 16
+        aead                = aeadAppendHeader aeadIni header
+        (output, aeadFinal) = aeadDecrypt aead input
+        tag                 = aeadFinalize aeadFinal taglen
 
 noFail :: CryptoFailable a -> a
 noFail = throwCryptoError
 
 makeIV_ :: BlockCipher a => B.ByteString -> IV a
-makeIV_ = maybe (error "makeIV_") id . makeIV
+makeIV_ = fromMaybe (error "makeIV_") . makeIV
 
 tripledes_ede :: BulkDirection -> BulkKey -> BulkBlock
 tripledes_ede BulkEncrypt key =
@@ -134,7 +198,7 @@ tripledes_ede BulkDecrypt key =
      in (\iv input -> let output = cbcDecrypt ctx (tripledes_iv iv) input in (output, takelast 8 input))
 
 tripledes_iv :: BulkIV -> IV DES_EDE3
-tripledes_iv iv = maybe (error "tripledes cipher iv internal error") id $ makeIV iv
+tripledes_iv iv = fromMaybe (error "tripledes cipher iv internal error") $ makeIV iv
 
 rc4 :: BulkDirection -> BulkKey -> BulkStream
 rc4 _ bulkKey = BulkStream (combineRC4 $ RC4.initialize bulkKey)
@@ -154,6 +218,9 @@ ciphersuite_default =
       cipher_ECDHE_ECDSA_AES128GCM_SHA256, cipher_ECDHE_ECDSA_AES256GCM_SHA384
     , cipher_ECDHE_RSA_AES128GCM_SHA256, cipher_ECDHE_RSA_AES256GCM_SHA384
     , cipher_DHE_RSA_AES128GCM_SHA256, cipher_DHE_RSA_AES256GCM_SHA384
+    ,        -- Next the PFS + CCM + SHA2 ciphers
+      cipher_ECDHE_ECDSA_AES128CCM_SHA256, cipher_ECDHE_ECDSA_AES256CCM_SHA256
+    , cipher_DHE_RSA_AES128CCM_SHA256, cipher_DHE_RSA_AES256CCM_SHA256
              -- Next the PFS + CBC + SHA2 ciphers
     , cipher_ECDHE_ECDSA_AES128CBC_SHA256, cipher_ECDHE_ECDSA_AES256CBC_SHA384
     , cipher_ECDHE_RSA_AES128CBC_SHA256, cipher_ECDHE_RSA_AES256CBC_SHA384
@@ -164,6 +231,8 @@ ciphersuite_default =
     , cipher_DHE_RSA_AES128_SHA1, cipher_DHE_RSA_AES256_SHA1
              -- Next the non-PFS + GCM + SHA2 ciphers
     , cipher_AES128GCM_SHA256, cipher_AES256GCM_SHA384
+             -- Next the non-PFS + CCM + SHA2 ciphers
+    , cipher_AES128CCM_SHA256, cipher_AES256CCM_SHA256
              -- Next the non-PFS + CBC + SHA2 ciphers
     , cipher_AES256_SHA256, cipher_AES128_SHA256
              -- Next the non-PFS + CBC + SHA1 ciphers
@@ -178,7 +247,10 @@ ciphersuite_default =
 -- | The default ciphersuites + some not recommended last resort ciphers.
 ciphersuite_all :: [Cipher]
 ciphersuite_all = ciphersuite_default ++
-    [ cipher_DHE_DSS_AES256_SHA1, cipher_DHE_DSS_AES128_SHA1
+    [ cipher_ECDHE_ECDSA_AES128CCM8_SHA256, cipher_ECDHE_ECDSA_AES256CCM8_SHA256
+    , cipher_DHE_RSA_AES128CCM8_SHA256, cipher_DHE_RSA_AES256CCM8_SHA256
+    , cipher_DHE_DSS_AES256_SHA1, cipher_DHE_DSS_AES128_SHA1
+    , cipher_AES128CCM8_SHA256, cipher_AES256CCM8_SHA256
     , cipher_RSA_3DES_EDE_CBC_SHA1
     , cipher_RC4_128_SHA1
     ]
@@ -196,9 +268,11 @@ ciphersuite_medium = [ cipher_RC4_128_SHA1
 ciphersuite_strong :: [Cipher]
 ciphersuite_strong =
     [        -- If we have PFS + AEAD + SHA2, then allow AES128, else just 256
-      cipher_ECDHE_ECDSA_AES256GCM_SHA384, cipher_ECDHE_ECDSA_AES128GCM_SHA256
+      cipher_ECDHE_ECDSA_AES256GCM_SHA384, cipher_ECDHE_ECDSA_AES256CCM_SHA256
+    , cipher_ECDHE_ECDSA_AES128GCM_SHA256, cipher_ECDHE_ECDSA_AES128CCM_SHA256
     , cipher_ECDHE_RSA_AES256GCM_SHA384, cipher_ECDHE_RSA_AES128GCM_SHA256
-    , cipher_DHE_RSA_AES256GCM_SHA384, cipher_DHE_RSA_AES128GCM_SHA256
+    , cipher_DHE_RSA_AES256GCM_SHA384, cipher_DHE_RSA_AES256CCM_SHA256
+    , cipher_DHE_RSA_AES128GCM_SHA256, cipher_DHE_RSA_AES128CCM_SHA256
              -- No AEAD
     , cipher_ECDHE_ECDSA_AES256CBC_SHA384
     , cipher_ECDHE_RSA_AES256CBC_SHA384
@@ -209,6 +283,7 @@ ciphersuite_strong =
     , cipher_DHE_RSA_AES256_SHA1
              -- No PFS
     , cipher_AES256GCM_SHA384
+    , cipher_AES256CCM_SHA256
              -- Neither PFS nor AEAD, just SHA2
     , cipher_AES256_SHA256
              -- Last resort no PFS, AEAD or SHA2
@@ -230,6 +305,7 @@ ciphersuite_unencrypted :: [Cipher]
 ciphersuite_unencrypted = [cipher_null_MD5, cipher_null_SHA1]
 
 bulk_null, bulk_rc4, bulk_aes128, bulk_aes256, bulk_tripledes_ede, bulk_aes128gcm, bulk_aes256gcm :: Bulk
+bulk_aes128ccm, bulk_aes128ccm8, bulk_aes256ccm, bulk_aes256ccm8 :: Bulk
 bulk_null = Bulk
     { bulkName         = "null"
     , bulkKeySize      = 0
@@ -262,6 +338,26 @@ bulk_aes128 = Bulk
     , bulkF            = BulkBlockF aes128cbc
     }
 
+bulk_aes128ccm = Bulk
+    { bulkName         = "AES128CCM"
+    , bulkKeySize      = 16 -- RFC 5116 Sec 5.1: K_LEN
+    , bulkIVSize       = 4  -- RFC 6655 CCMNonce.salt, fixed_iv_length
+    , bulkExplicitIV   = 8
+    , bulkAuthTagLen   = 16
+    , bulkBlockSize    = 0  -- dummy, not used
+    , bulkF            = BulkAeadF aes128ccm
+    }
+
+bulk_aes128ccm8 = Bulk
+    { bulkName         = "AES128CCM8"
+    , bulkKeySize      = 16 -- RFC 5116 Sec 5.1: K_LEN
+    , bulkIVSize       = 4  -- RFC 6655 CCMNonce.salt, fixed_iv_length
+    , bulkExplicitIV   = 8
+    , bulkAuthTagLen   = 8
+    , bulkBlockSize    = 0  -- dummy, not used
+    , bulkF            = BulkAeadF aes128ccm8
+    }
+
 bulk_aes128gcm = Bulk
     { bulkName         = "AES128GCM"
     , bulkKeySize      = 16 -- RFC 5116 Sec 5.1: K_LEN
@@ -270,6 +366,26 @@ bulk_aes128gcm = Bulk
     , bulkAuthTagLen   = 16
     , bulkBlockSize    = 0  -- dummy, not used
     , bulkF            = BulkAeadF aes128gcm
+    }
+
+bulk_aes256ccm = Bulk
+    { bulkName         = "AES256CCM"
+    , bulkKeySize      = 32 -- RFC 5116 Sec 5.1: K_LEN
+    , bulkIVSize       = 4  -- RFC 6655 CCMNonce.salt, fixed_iv_length
+    , bulkExplicitIV   = 8
+    , bulkAuthTagLen   = 16
+    , bulkBlockSize    = 0  -- dummy, not used
+    , bulkF            = BulkAeadF aes256ccm
+    }
+
+bulk_aes256ccm8 = Bulk
+    { bulkName         = "AES256CCM8"
+    , bulkKeySize      = 32 -- RFC 5116 Sec 5.1: K_LEN
+    , bulkIVSize       = 4  -- RFC 6655 CCMNonce.salt, fixed_iv_length
+    , bulkExplicitIV   = 8
+    , bulkAuthTagLen   = 8
+    , bulkBlockSize    = 0  -- dummy, not used
+    , bulkF            = BulkAeadF aes256ccm8
     }
 
 bulk_aes256gcm = Bulk
@@ -475,6 +591,32 @@ cipher_DHE_RSA_AES256_SHA256 = cipher_DHE_RSA_AES128_SHA256
     , cipherBulk         = bulk_aes256
     }
 
+-- | AESCCM cipher (128 bit key), RSA key exchange.
+-- The SHA256 digest is used as a PRF, not as a MAC.
+cipher_AES128CCM_SHA256 :: Cipher
+cipher_AES128CCM_SHA256 = Cipher
+    { cipherID           = 0xc09c
+    , cipherName         = "RSA-AES128CCM-SHA256"
+    , cipherBulk         = bulk_aes128ccm
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_RSA
+    , cipherMinVer       = Just TLS12 -- RFC 6655 Sec 3
+    }
+
+-- | AESCCM8 cipher (128 bit key), RSA key exchange.
+-- The SHA256 digest is used as a PRF, not as a MAC.
+cipher_AES128CCM8_SHA256 :: Cipher
+cipher_AES128CCM8_SHA256 = Cipher
+    { cipherID           = 0xc0a0
+    , cipherName         = "RSA-AES128CCM8-SHA256"
+    , cipherBulk         = bulk_aes128ccm8
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_RSA
+    , cipherMinVer       = Just TLS12 -- RFC 6655 Sec 3
+    }
+
 -- | AESGCM cipher (128 bit key), RSA key exchange.
 -- The SHA256 digest is used as a PRF, not as a MAC.
 cipher_AES128GCM_SHA256 :: Cipher
@@ -486,6 +628,32 @@ cipher_AES128GCM_SHA256 = Cipher
     , cipherPRFHash      = Just SHA256
     , cipherKeyExchange  = CipherKeyExchange_RSA
     , cipherMinVer       = Just TLS12
+    }
+
+-- | AESCCM cipher (256 bit key), RSA key exchange.
+-- The SHA256 digest is used as a PRF, not as a MAC.
+cipher_AES256CCM_SHA256 :: Cipher
+cipher_AES256CCM_SHA256 = Cipher
+    { cipherID           = 0xc09d
+    , cipherName         = "RSA-AES256CCM-SHA256"
+    , cipherBulk         = bulk_aes256ccm
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_RSA
+    , cipherMinVer       = Just TLS12 -- RFC 6655 Sec 3
+    }
+
+-- | AESCCM8 cipher (256 bit key), RSA key exchange.
+-- The SHA256 digest is used as a PRF, not as a MAC.
+cipher_AES256CCM8_SHA256 :: Cipher
+cipher_AES256CCM8_SHA256 = Cipher
+    { cipherID           = 0xc0a1
+    , cipherName         = "RSA-AES256CCM8-SHA256"
+    , cipherBulk         = bulk_aes256ccm8
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_RSA
+    , cipherMinVer       = Just TLS12 -- RFC 6655 Sec 3
     }
 
 -- | AESGCM cipher (256 bit key), RSA key exchange.
@@ -501,6 +669,28 @@ cipher_AES256GCM_SHA384 = Cipher
     , cipherMinVer       = Just TLS12
     }
 
+cipher_DHE_RSA_AES128CCM_SHA256 :: Cipher
+cipher_DHE_RSA_AES128CCM_SHA256 = Cipher
+    { cipherID           = 0xc09e
+    , cipherName         = "DHE-RSA-AES128CCM-SHA256"
+    , cipherBulk         = bulk_aes128ccm
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_DHE_RSA
+    , cipherMinVer       = Just TLS12 -- RFC 6655 Sec 3
+    }
+
+cipher_DHE_RSA_AES128CCM8_SHA256 :: Cipher
+cipher_DHE_RSA_AES128CCM8_SHA256 = Cipher
+    { cipherID           = 0xc0a2
+    , cipherName         = "DHE-RSA-AES128CCM8-SHA256"
+    , cipherBulk         = bulk_aes128ccm8
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_DHE_RSA
+    , cipherMinVer       = Just TLS12 -- RFC 6655 Sec 3
+    }
+
 cipher_DHE_RSA_AES128GCM_SHA256 :: Cipher
 cipher_DHE_RSA_AES128GCM_SHA256 = Cipher
     { cipherID           = 0x009E
@@ -510,6 +700,28 @@ cipher_DHE_RSA_AES128GCM_SHA256 = Cipher
     , cipherPRFHash      = Just SHA256
     , cipherKeyExchange  = CipherKeyExchange_DHE_RSA
     , cipherMinVer       = Just TLS12 -- RFC 5288 Sec 4
+    }
+
+cipher_DHE_RSA_AES256CCM_SHA256 :: Cipher
+cipher_DHE_RSA_AES256CCM_SHA256 = Cipher
+    { cipherID           = 0xc09f
+    , cipherName         = "DHE-RSA-AES256CCM-SHA256"
+    , cipherBulk         = bulk_aes256ccm
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_DHE_RSA
+    , cipherMinVer       = Just TLS12 -- RFC 6655 Sec 3
+    }
+
+cipher_DHE_RSA_AES256CCM8_SHA256 :: Cipher
+cipher_DHE_RSA_AES256CCM8_SHA256 = Cipher
+    { cipherID           = 0xc0a3
+    , cipherName         = "DHE-RSA-AES256CCM8-SHA256"
+    , cipherBulk         = bulk_aes256ccm8
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_DHE_RSA
+    , cipherMinVer       = Just TLS12 -- RFC 6655 Sec 3
     }
 
 cipher_DHE_RSA_AES256GCM_SHA384 :: Cipher
@@ -611,6 +823,28 @@ cipher_ECDHE_ECDSA_AES256CBC_SHA384 = Cipher
     , cipherMinVer       = Just TLS12 -- RFC 5289
     }
 
+cipher_ECDHE_ECDSA_AES128CCM_SHA256 :: Cipher
+cipher_ECDHE_ECDSA_AES128CCM_SHA256 = Cipher
+    { cipherID           = 0xc0ac
+    , cipherName         = "ECDHE-ECDSA-AES128CCM-SHA256"
+    , cipherBulk         = bulk_aes128ccm
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_ECDHE_ECDSA
+    , cipherMinVer       = Just TLS12 -- RFC 7251
+    }
+
+cipher_ECDHE_ECDSA_AES128CCM8_SHA256 :: Cipher
+cipher_ECDHE_ECDSA_AES128CCM8_SHA256 = Cipher
+    { cipherID           = 0xc0ae
+    , cipherName         = "ECDHE-ECDSA-AES128CCM8-SHA256"
+    , cipherBulk         = bulk_aes128ccm8
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_ECDHE_ECDSA
+    , cipherMinVer       = Just TLS12 -- RFC 7251
+    }
+
 cipher_ECDHE_ECDSA_AES128GCM_SHA256 :: Cipher
 cipher_ECDHE_ECDSA_AES128GCM_SHA256 = Cipher
     { cipherID           = 0xC02B
@@ -620,6 +854,28 @@ cipher_ECDHE_ECDSA_AES128GCM_SHA256 = Cipher
     , cipherPRFHash      = Just SHA256
     , cipherKeyExchange  = CipherKeyExchange_ECDHE_ECDSA
     , cipherMinVer       = Just TLS12 -- RFC 5289
+    }
+
+cipher_ECDHE_ECDSA_AES256CCM_SHA256 :: Cipher
+cipher_ECDHE_ECDSA_AES256CCM_SHA256 = Cipher
+    { cipherID           = 0xc0ad
+    , cipherName         = "ECDHE-ECDSA-AES256CCM-SHA256"
+    , cipherBulk         = bulk_aes256ccm
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_ECDHE_ECDSA
+    , cipherMinVer       = Just TLS12 -- RFC 7251
+    }
+
+cipher_ECDHE_ECDSA_AES256CCM8_SHA256 :: Cipher
+cipher_ECDHE_ECDSA_AES256CCM8_SHA256 = Cipher
+    { cipherID           = 0xc0af
+    , cipherName         = "ECDHE-ECDSA-AES256CCM8-SHA256"
+    , cipherBulk         = bulk_aes256ccm8
+    , cipherHash         = SHA256
+    , cipherPRFHash      = Just SHA256
+    , cipherKeyExchange  = CipherKeyExchange_ECDHE_ECDSA
+    , cipherMinVer       = Just TLS12 -- RFC 7251
     }
 
 cipher_ECDHE_ECDSA_AES256GCM_SHA384 :: Cipher

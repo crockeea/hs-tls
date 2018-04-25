@@ -57,7 +57,6 @@ import Network.TLS.RNG
 import Network.TLS.Types (Role(..))
 import Network.TLS.Wire (GetContinuation)
 import Network.TLS.Extension
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Control.Monad.State.Strict
 import Network.TLS.ErrT
@@ -174,10 +173,10 @@ setVersionIfUnset ver = modify maybeSet
                            Just _  -> st
 
 getVersion :: TLSSt Version
-getVersion = maybe (error $ "internal error: version hasn't been set yet") id <$> gets stVersion
+getVersion = fromMaybe (error "internal error: version hasn't been set yet") <$> gets stVersion
 
 getVersionWithDefault :: Version -> TLSSt Version
-getVersionWithDefault defaultVer = maybe defaultVer id <$> gets stVersion
+getVersionWithDefault defaultVer = fromMaybe defaultVer <$> gets stVersion
 
 setSecureRenegotiation :: Bool -> TLSSt ()
 setSecureRenegotiation b = modify (\st -> st { stSecureRenegotiation = b })

@@ -23,9 +23,8 @@ module Network.TLS.Compression
     , compressionIntersectID
     ) where
 
-import Data.Word
 import Network.TLS.Types (CompressionID)
-import Data.ByteString (ByteString)
+import Network.TLS.Imports
 import Control.Arrow (first)
 
 -- | supported compression algorithms need to be part of this class
@@ -60,7 +59,7 @@ instance Eq Compression where
 -- the function keeps the list of compression in order, to be able to find quickly the prefered
 -- compression.
 compressionIntersectID :: [Compression] -> [Word8] -> [Compression]
-compressionIntersectID l ids = filter (\c -> elem (compressionID c) ids) l
+compressionIntersectID l ids = filter (\c -> compressionID c `elem` ids) l
 
 -- | This is the default compression which is a NOOP.
 data NullCompression = NullCompression

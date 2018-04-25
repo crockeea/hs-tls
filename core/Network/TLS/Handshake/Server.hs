@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE CPP #-}
 -- |
 -- Module      : Network.TLS.Handshake.Server
 -- License     : BSD-style
@@ -30,17 +29,7 @@ import Network.TLS.Handshake.State
 import Network.TLS.Handshake.Process
 import Network.TLS.Handshake.Key
 import Network.TLS.Measurement
-import Data.Maybe (isJust, listToMaybe, mapMaybe)
-import Data.List (findIndex, intersect)
 import qualified Data.ByteString as B
-import Data.ByteString.Char8 ()
-import Data.Ord (Down(..))
-#if MIN_VERSION_base(4,8,0)
-import Data.List (sortOn)
-#else
-import Data.List (sortBy)
-import Data.Ord (comparing)
-#endif
 
 import Control.Monad.State.Strict
 
@@ -163,16 +152,24 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
     -- negotiated signature parameters.  Then ciphers are evalutated from
     -- the resulting credentials.
 
-    let possibleGroups = negotiatedGroupsInCommon ctx exts
-        hasCommonGroupForECDHE = not (null possibleGroups)
+    let possibleGroups   = negotiatedGroupsInCommon ctx exts
+        possibleECGroups = possibleGroups `intersect` availableECGroups
+        possibleFFGroups = possibleGroups `intersect` availableFFGroups
+        hasCommonGroupForECDHE = not (null possibleECGroups)
+        hasCommonGroupForFFDHE = not (null possibleFFGroups)
+        hasCustomGroupForFFDHE = isJust (serverDHEParams sparams)
+        canFFDHE = hasCustomGroupForFFDHE || hasCommonGroupForFFDHE
         hasCommonGroup cipher =
             case cipherKeyExchange cipher of
+                CipherKeyExchange_DH_Anon      -> canFFDHE
+                CipherKeyExchange_DHE_RSA      -> canFFDHE
+                CipherKeyExchange_DHE_DSS      -> canFFDHE
                 CipherKeyExchange_ECDHE_RSA    -> hasCommonGroupForECDHE
                 CipherKeyExchange_ECDHE_ECDSA  -> hasCommonGroupForECDHE
                 _                              -> True -- group not used
 
-        -- Ciphers are selected according to TLS version, availability of ECDHE
-        -- group and credential depending on key exchange.
+        -- Ciphers are selected according to TLS version, availability of
+        -- (EC)DHE group and credential depending on key exchange.
         cipherAllowed cipher   = cipherAllowedForVersion chosenVersion cipher && hasCommonGroup cipher
         selectCipher credentials signatureCredentials = filter cipherAllowed (commonCiphers credentials signatureCredentials)
 
@@ -224,7 +221,7 @@ handshakeServerWith sparams ctx clientHello@(ClientHello clientVersion _ clientS
     checkMasterSecret 14 ctx
     cred <- case cipherKeyExchange usedCipher of
                 CipherKeyExchange_RSA       -> return $ credentialsFindForDecrypting creds
-                CipherKeyExchange_DH_Anon   -> return $ Nothing
+                CipherKeyExchange_DH_Anon   -> return   Nothing
                 CipherKeyExchange_DHE_RSA   -> return $ credentialsFindForSigning RSA signatureCreds
                 CipherKeyExchange_DHE_DSS   -> return $ credentialsFindForSigning DSS signatureCreds
                 CipherKeyExchange_ECDHE_RSA -> return $ credentialsFindForSigning RSA signatureCreds
@@ -396,8 +393,17 @@ doHandshake sparams mcred ctx chosenVersion usedCipher usedCompression clientSes
         extractCAname cert = certSubjectDN $ getCertificate cert
 
         setup_DHE = do
-            let dhparams = fromJust "server DHE Params" $ serverDHEParams sparams
-            (priv, pub) <- generateDHE ctx dhparams
+            let possibleFFGroups = negotiatedGroupsInCommon ctx exts `intersect` availableFFGroups
+            (dhparams, priv, pub) <-
+                    case possibleFFGroups of
+                        []  ->
+                            let dhparams = fromJust "server DHE Params" $ serverDHEParams sparams
+                             in case findFiniteFieldGroup dhparams of
+                                    Just g  -> generateFFDHE ctx g
+                                    Nothing -> do
+                                        (priv, pub) <- generateDHE ctx dhparams
+                                        return (dhparams, priv, pub)
+                        g:_ -> generateFFDHE ctx g
 
             let serverParams = serverDHParamsFrom dhparams pub
 
@@ -440,8 +446,8 @@ doHandshake sparams mcred ctx chosenVersion usedCipher usedCompression clientSes
             return serverParams
 
         generateSKX_ECDHE sigAlg = do
-            let possibleGroups = negotiatedGroupsInCommon ctx exts
-            grp <- case possibleGroups of
+            let possibleECGroups = negotiatedGroupsInCommon ctx exts `intersect` availableECGroups
+            grp <- case possibleECGroups of
                      []  -> throwCore $ Error_Protocol ("no common group", True, HandshakeFailure)
                      g:_ -> return g
             serverParams <- setup_ECDHE grp
@@ -509,31 +515,28 @@ recvClientData sparams ctx = runRecvState ctx (RecvStateHandshake processClientC
 
             verif <- checkCertificateVerify ctx usedVersion sigAlgExpected msgs dsig
 
-            case verif of
-                True -> do
-                    -- When verification succeeds, commit the
-                    -- client certificate chain to the context.
-                    --
-                    Just certs <- usingHState ctx getClientCertChain
-                    usingState_ ctx $ setClientCertificateChain certs
-                    return ()
-
-                False -> do
-                    -- Either verification failed because of an
-                    -- invalid format (with an error message), or
-                    -- the signature is wrong.  In either case,
-                    -- ask the application if it wants to
-                    -- proceed, we will do that.
-                    res <- liftIO $ onUnverifiedClientCert (serverHooks sparams)
-                    if res
-                        then do
-                            -- When verification fails, but the
-                            -- application callbacks accepts, we
-                            -- also commit the client certificate
-                            -- chain to the context.
-                            Just certs <- usingHState ctx getClientCertChain
-                            usingState_ ctx $ setClientCertificateChain certs
-                        else throwCore $ Error_Protocol ("verification failed", True, BadCertificate)
+            if verif then do
+                -- When verification succeeds, commit the
+                -- client certificate chain to the context.
+                --
+                Just certs <- usingHState ctx getClientCertChain
+                usingState_ ctx $ setClientCertificateChain certs
+                return ()
+              else do
+                -- Either verification failed because of an
+                -- invalid format (with an error message), or
+                -- the signature is wrong.  In either case,
+                -- ask the application if it wants to
+                -- proceed, we will do that.
+                res <- liftIO $ onUnverifiedClientCert (serverHooks sparams)
+                if res then do
+                        -- When verification fails, but the
+                        -- application callbacks accepts, we
+                        -- also commit the client certificate
+                        -- chain to the context.
+                        Just certs <- usingHState ctx getClientCertChain
+                        usingState_ ctx $ setClientCertificateChain certs
+                    else throwCore $ Error_Protocol ("verification failed", True, BadCertificate)
             return $ RecvStateNext expectChangeCipher
 
         processCertificateVerify p = do
@@ -553,7 +556,7 @@ recvClientData sparams ctx = runRecvState ctx (RecvStateHandshake processClientC
                 _             -> throwCore $ Error_Protocol ("unsupported remote public key type", True, HandshakeFailure)
 
         expectChangeCipher ChangeCipherSpec = do
-            return $ RecvStateHandshake $ expectFinish
+            return $ RecvStateHandshake expectFinish
 
         expectChangeCipher p                = unexpected (show p) (Just "change cipher")
 
@@ -586,7 +589,7 @@ hashAndSignaturesInCommon ctx exts =
 negotiatedGroupsInCommon :: Context -> [ExtensionRaw] -> [Group]
 negotiatedGroupsInCommon ctx exts = case extensionLookup extensionID_NegotiatedGroups exts >>= extensionDecode False of
     Just (NegotiatedGroups clientGroups) ->
-        let serverGroups = supportedGroups (ctxSupported ctx) `intersect` availableGroups
+        let serverGroups = supportedGroups (ctxSupported ctx)
         in serverGroups `intersect` clientGroups
     _                                    -> []
 
@@ -626,9 +629,9 @@ findHighestVersionFrom clientVersion allowedVersions =
         []  -> Nothing
         v:_ -> Just v
 
--- We filter our allowed ciphers here according to server DHE parameters and
--- dynamic credential lists.  Credentials 'creds' come from server parameters
--- but also SNI callback.  When the key exchange requires a signature, we use a
+-- We filter our allowed ciphers here according to dynamic credential lists.
+-- Credentials 'creds' come from server parameters but also SNI callback.
+-- When the key exchange requires a signature, we use a
 -- subset of this list named 'sigCreds'.  This list has been filtered in order
 -- to remove certificates that are not compatible with hash/signature
 -- restrictions (TLS 1.2).
@@ -637,9 +640,9 @@ getCiphers sparams creds sigCreds = filter authorizedCKE (supportedCiphers $ ser
       where authorizedCKE cipher =
                 case cipherKeyExchange cipher of
                     CipherKeyExchange_RSA         -> canEncryptRSA
-                    CipherKeyExchange_DH_Anon     -> canDHE
-                    CipherKeyExchange_DHE_RSA     -> canSignRSA && canDHE
-                    CipherKeyExchange_DHE_DSS     -> canSignDSS && canDHE
+                    CipherKeyExchange_DH_Anon     -> True
+                    CipherKeyExchange_DHE_RSA     -> canSignRSA
+                    CipherKeyExchange_DHE_DSS     -> canSignDSS
                     CipherKeyExchange_ECDHE_RSA   -> canSignRSA
                     -- unimplemented: EC
                     CipherKeyExchange_ECDHE_ECDSA -> False
@@ -652,14 +655,7 @@ getCiphers sparams creds sigCreds = filter authorizedCKE (supportedCiphers $ ser
                     CipherKeyExchange_ECDH_ECDSA  -> False
                     CipherKeyExchange_ECDH_RSA    -> False
 
-            canDHE        = isJust $ serverDHEParams sparams
             canSignDSS    = DSS `elem` signingAlgs
             canSignRSA    = RSA `elem` signingAlgs
             canEncryptRSA = isJust $ credentialsFindForDecrypting creds
             signingAlgs   = credentialsListSigningAlgorithms sigCreds
-
-#if !MIN_VERSION_base(4,8,0)
-sortOn :: Ord b => (a -> b) -> [a] -> [a]
-sortOn f =
-  map snd . sortBy (comparing fst) . map (\x -> let y = f x in y `seq` (y, x))
-#endif

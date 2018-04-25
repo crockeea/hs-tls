@@ -15,9 +15,10 @@ module Network.TLS.Handshake.Key
     , generateDHE
     , generateECDHE
     , generateECDHEShared
+    , generateFFDHE
+    , generateFFDHEShared
     ) where
 
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 
 import Network.TLS.Handshake.State
@@ -25,6 +26,7 @@ import Network.TLS.State (withRNG, getVersion)
 import Network.TLS.Crypto
 import Network.TLS.Types
 import Network.TLS.Context.Internal
+import Network.TLS.Imports
 
 {- if the RSA encryption fails we just return an empty bytestring, and let the protocol
  - fail by itself; however it would be probably better to just report it since it's an internal problem.
@@ -68,3 +70,9 @@ generateECDHE ctx grp = usingState_ ctx $ withRNG $ groupGenerateKeyPair grp
 
 generateECDHEShared :: Context -> GroupPublic -> IO (Maybe (GroupPublic, GroupKey))
 generateECDHEShared ctx pub = usingState_ ctx $ withRNG $ groupGetPubShared pub
+
+generateFFDHE :: Context -> Group -> IO (DHParams, DHPrivate, DHPublic)
+generateFFDHE ctx grp = usingState_ ctx $ withRNG $ dhGroupGenerateKeyPair grp
+
+generateFFDHEShared :: Context -> Group -> DHPublic -> IO (Maybe (DHPublic, DHKey))
+generateFFDHEShared ctx grp pub = usingState_ ctx $ withRNG $ dhGroupGetPubShared grp pub
