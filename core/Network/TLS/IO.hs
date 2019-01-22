@@ -39,7 +39,6 @@ import Data.IORef
 import Control.Monad.Reader
 import Control.Exception (finally, throwIO)
 import System.IO.Error (mkIOError, eofErrorType)
-import Control.Monad.IO.Class
 
 checkValid :: Context -> IO ()
 checkValid ctx = do
@@ -111,11 +110,8 @@ isCCS _                                          = False
 -- TLSError if the packet is unexpected or malformed
 recvPacket :: MonadIO m => Context -> m (Either TLSError Packet)
 recvPacket ctx = liftIO $ do
-    --liftIO $ putStrLn "inside recvPacket 1"
     compatSSLv2 <- ctxHasSSLv2ClientHello ctx
-    --liftIO $ putStrLn "inside recvPacket 2"
     erecord     <- recvRecord compatSSLv2 ctx
-    --liftIO $ putStrLn "inside recvPacket 3"
     case erecord of
         Left err     -> return $ Left err
         Right record -> do
@@ -124,7 +120,6 @@ recvPacket ctx = liftIO $ do
                 recvPacket ctx
               else do
                 pktRecv <- processPacket ctx record
-            --liftIO $ putStrLn "inside recvPacket 5"
                 pkt <- case pktRecv of
                         Right (Handshake hss) ->
                             ctxWithHooks ctx $ \hooks ->
@@ -133,9 +128,7 @@ recvPacket ctx = liftIO $ do
                 case pkt of
                     Right p -> withLog ctx $ \logging -> loggingPacketRecv logging $ show p
                     _       -> return ()
-            --liftIO $ putStrLn "inside recvPacket 6"
                 when compatSSLv2 $ ctxDisableSSLv2ClientHello ctx
-            --liftIO $ putStrLn "inside recvPacket 7"
                 return pkt
 
 -- | Send one packet to the context

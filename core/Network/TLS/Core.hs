@@ -27,7 +27,6 @@ module Network.TLS.Core
     , sendData
     , recvData
     , recvAuthData
-    , checkMasterSecret
     , recvData'
     , updateKey
     , KeyUpdateRequest(..)
@@ -43,7 +42,7 @@ import Network.TLS.Parameters
 import Network.TLS.IO
 import Network.TLS.Session
 import Network.TLS.Handshake
-import Network.TLS.Handshake.State
+--import Network.TLS.Handshake.State
 import Network.TLS.Handshake.Common
 import Network.TLS.Handshake.Common13
 import Network.TLS.Handshake.Process
@@ -60,7 +59,6 @@ import qualified Data.ByteString.Lazy as L
 import qualified Control.Exception as E
 
 import Control.Monad.State.Strict
-import Control.Concurrent.MVar
 import Data.X509 (CertificateChain)
 
 -- | notify the context that this side wants to close connection.
@@ -279,17 +277,6 @@ recvData' :: MonadIO m => Context -> m L.ByteString
 recvData' ctx = L.fromChunks . (:[]) <$> recvData ctx
 
 
-checkMasterSecret :: (MonadIO m) => Int -> Context -> m ()
-checkMasterSecret i ctx = liftIO $ do
-    mhstate <- getHState ctx
-    return ()
-    {-
-    case mhstate of
-      Nothing -> putStrLn $ "No hstate " ++ show i
-      (Just st) -> case hstMasterSecret st of
-         Nothing -> putStrLn $ "No master secret " ++ show i
-         _ -> putStrLn $ "Mast secret found at " ++ show i 
--}
 recvAuthData :: (MonadIO m) => Context -> m (CertificateChain, B.ByteString)
 recvAuthData ctx = liftIO $ do
     x <- recvData ctx
@@ -299,6 +286,7 @@ recvAuthData ctx = liftIO $ do
         (Just st) -> case hstClientCertChain st of
             Nothing -> error "EAC: No client cert chain"
             (Just cc) -> return (cc, x)
+
 keyUpdate :: Context
           -> (Context -> IO (Hash,Cipher,C8.ByteString))
           -> (Context -> Hash -> Cipher -> C8.ByteString -> IO ())

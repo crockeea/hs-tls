@@ -69,7 +69,6 @@ module Network.TLS
     -- ** X509 Validation
     , ValidationChecks(..)
     , ValidationHooks(..)
-    , checkMasterSecret
 
     -- ** X509 Validation Cache
     , ValidationCache(..)
