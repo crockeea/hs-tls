@@ -90,14 +90,14 @@ credentialLoadX509ChainFromMemory certData chainData privateData = do
             []    -> Left "no keys found"
             (k:_) -> Right (CertificateChain . concat $ x509 : chains, k)
 
-credentialsListSigningAlgorithms :: Credentials -> [DigitalSignatureAlg]
+credentialsListSigningAlgorithms :: Credentials -> [KeyExchangeSignatureAlg]
 credentialsListSigningAlgorithms (Credentials l) = mapMaybe credentialCanSign l
 
-credentialsFindForSigning :: DigitalSignatureAlg -> Credentials -> Maybe Credential
-credentialsFindForSigning sigAlg (Credentials l) = find forSigning l
+credentialsFindForSigning :: KeyExchangeSignatureAlg -> Credentials -> Maybe Credential
+credentialsFindForSigning kxsAlg (Credentials l) = find forSigning l
   where forSigning cred = case credentialCanSign cred of
             Nothing  -> False
-            Just sig -> sig == sigAlg
+            Just kxs -> kxs == kxsAlg
 
 credentialsFindForDecrypting :: Credentials -> Maybe Credential
 credentialsFindForDecrypting (Credentials l) = find forEncrypting l
@@ -120,12 +120,12 @@ credentialCanDecrypt (chain, priv) =
           pub    = certPubKey cert
           signed = getCertificateChainLeaf chain
 
-credentialCanSign :: Credential -> Maybe DigitalSignatureAlg
+credentialCanSign :: Credential -> Maybe KeyExchangeSignatureAlg
 credentialCanSign (chain, priv) =
     case extensionGet (certExtensions cert) of
-        Nothing    -> findDigitalSignatureAlg (pub, priv)
+        Nothing    -> findKeyExchangeSignatureAlg (pub, priv)
         Just (ExtKeyUsage flags)
-            | KeyUsage_digitalSignature `elem` flags -> findDigitalSignatureAlg (pub, priv)
+            | KeyUsage_digitalSignature `elem` flags -> findKeyExchangeSignatureAlg (pub, priv)
             | otherwise                              -> Nothing
     where cert   = signedObject $ getSigned signed
           pub    = certPubKey cert
@@ -144,9 +144,12 @@ getHashSignature signed =
         SignatureALG hashAlg PubKeyALG_DSA    -> convertHash TLS.SignatureDSS   hashAlg
         SignatureALG hashAlg PubKeyALG_EC     -> convertHash TLS.SignatureECDSA hashAlg
 
-        SignatureALG X509.HashSHA256 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssSHA256)
-        SignatureALG X509.HashSHA384 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssSHA384)
-        SignatureALG X509.HashSHA512 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssSHA512)
+        SignatureALG X509.HashSHA256 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssRSAeSHA256)
+        SignatureALG X509.HashSHA384 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssRSAeSHA384)
+        SignatureALG X509.HashSHA512 PubKeyALG_RSAPSS -> Just (TLS.HashIntrinsic, TLS.SignatureRSApssRSAeSHA512)
+
+        SignatureALG_IntrinsicHash PubKeyALG_Ed25519  -> Just (TLS.HashIntrinsic, TLS.SignatureEd25519)
+        SignatureALG_IntrinsicHash PubKeyALG_Ed448    -> Just (TLS.HashIntrinsic, TLS.SignatureEd448)
 
         _                                     -> Nothing
   where
@@ -158,10 +161,10 @@ getHashSignature signed =
     convertHash sig X509.HashSHA512 = Just (TLS.HashSHA512, sig)
     convertHash _   _               = Nothing
 
--- | Checks whether certificates in the chain comply with a list of
--- hash/signature algorithm pairs.  Currently the verification applies only
--- to the leaf certificate, if it is not self-signed.  This may be extended
--- to additional chain elements in the future.
+-- | Checks whether certificate signatures in the chain comply with a list of
+-- hash/signature algorithm pairs.  Currently the verification applies only to
+-- the signature of the leaf certificate, and when not self-signed.  This may
+-- be extended to additional chain elements in the future.
 credentialMatchesHashSignatures :: [TLS.HashAndSignatureAlgorithm] -> Credential -> Bool
 credentialMatchesHashSignatures hashSigs (chain, _) =
     case chain of

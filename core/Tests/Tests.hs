@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 import Test.Tasty
@@ -9,8 +8,11 @@ import PipeChan
 import Connection
 import Marshalling
 import Ciphers
+import PubKey
 
+import Data.Foldable (traverse_)
 import Data.Maybe
+import Data.Default.Class
 import Data.List (intersect)
 
 import qualified Data.ByteString as B
@@ -20,9 +22,11 @@ import Network.TLS
 import Network.TLS.Extra
 import Control.Applicative
 import Control.Concurrent
+import Control.Concurrent.Async
 import Control.Monad
 
 import Data.IORef
+import Data.X509 (ExtKeyUsageFlag(..))
 
 import System.Timeout
 
@@ -45,76 +49,404 @@ prop_pipe_work = do
 
     return ()
 
-recvDataNonNull :: Context -> IO C8.ByteString
-recvDataNonNull ctx = recvData ctx >>= \l -> if B.null l then recvDataNonNull ctx else return l
+chunkLengths :: Int -> [Int]
+chunkLengths len
+    | len > 16384 = 16384 : chunkLengths (len - 16384)
+    | len > 0     = [len]
+    | otherwise   = []
 
-runTLSPipe :: (ClientParams, ServerParams) -> (Context -> Chan C8.ByteString -> IO ()) -> (Chan C8.ByteString -> Context -> IO ()) -> PropertyM IO ()
-runTLSPipe params tlsServer tlsClient = do
-    (startQueue, resultQueue) <- run (establishDataPipe params tlsServer tlsClient)
+runTLSPipeN :: Int -> (ClientParams, ServerParams) -> (Context -> Chan [C8.ByteString] -> IO ()) -> (Chan C8.ByteString -> Context -> IO ()) -> PropertyM IO ()
+runTLSPipeN n params tlsServer tlsClient = do
+    (writeStart, readResult) <- run (establishDataPipe params tlsServer tlsClient)
     -- send some data
-    d <- B.pack <$> pick (someWords8 256)
-    run $ writeChan startQueue d
+    ds <- replicateM n $ do
+        d <- B.pack <$> pick (someWords8 256)
+        _ <- run $ writeStart d
+        return d
     -- receive it
-    dres <- run $ timeout 10000000 $ readChan resultQueue
+    dsres <- run $ timeout 60000000 readResult -- 60 sec
     -- check if it equal
-    Just d `assertEq` dres
-    return ()
+    Just ds `assertEq` dsres
 
-runTLSPipeSimple :: (ClientParams, ServerParams) -> PropertyM IO ()
-runTLSPipeSimple params = runTLSPipe params tlsServer tlsClient
+runTLSPipe :: (ClientParams, ServerParams) -> (Context -> Chan [C8.ByteString] -> IO ()) -> (Chan C8.ByteString -> Context -> IO ()) -> PropertyM IO ()
+runTLSPipe = runTLSPipeN 1
+
+runTLSPipePredicate :: (ClientParams, ServerParams) -> (Maybe Information -> Bool) -> PropertyM IO ()
+runTLSPipePredicate params p = runTLSPipe params tlsServer tlsClient
   where tlsServer ctx queue = do
             handshake ctx
-            d <- recvDataNonNull ctx
-            writeChan queue d
-            return ()
+            checkInfoPredicate ctx
+            d <- recvData ctx
+            writeChan queue [d]
+            bye ctx
+        tlsClient queue ctx = do
+            handshake ctx
+            checkInfoPredicate ctx
+            d <- readChan queue
+            sendData ctx (L.fromChunks [d])
+            byeBye ctx
+        checkInfoPredicate ctx = do
+            minfo <- contextGetInformation ctx
+            unless (p minfo) $
+                fail ("unexpected information: " ++ show minfo)
+
+runTLSPipeSimple :: (ClientParams, ServerParams) -> PropertyM IO ()
+runTLSPipeSimple params = runTLSPipePredicate params (const True)
+
+runTLSPipeSimple13 :: (ClientParams, ServerParams) -> HandshakeMode13 -> Maybe C8.ByteString -> PropertyM IO ()
+runTLSPipeSimple13 params mode mEarlyData = runTLSPipe params tlsServer tlsClient
+  where tlsServer ctx queue = do
+            handshake ctx
+            case mEarlyData of
+                Nothing -> return ()
+                Just ed -> do
+                    let ls = chunkLengths (B.length ed)
+                    chunks <- replicateM (length ls) $ recvData ctx
+                    (ls, ed) `assertEq` (map B.length chunks, B.concat chunks)
+            d <- recvData ctx
+            writeChan queue [d]
+            minfo <- contextGetInformation ctx
+            Just mode `assertEq` (minfo >>= infoTLS13HandshakeMode)
+            bye ctx
         tlsClient queue ctx = do
             handshake ctx
             d <- readChan queue
             sendData ctx (L.fromChunks [d])
-            bye ctx
-            return ()
+            minfo <- contextGetInformation ctx
+            Just mode `assertEq` (minfo >>= infoTLS13HandshakeMode)
+            byeBye ctx
 
-runTLSInitFailure :: (ClientParams, ServerParams) -> PropertyM IO ()
-runTLSInitFailure params = do
+runTLSPipeSimpleKeyUpdate :: (ClientParams, ServerParams) -> PropertyM IO ()
+runTLSPipeSimpleKeyUpdate params = runTLSPipeN 3 params tlsServer tlsClient
+  where tlsServer ctx queue = do
+            handshake ctx
+            d0 <- recvData ctx
+            req <- generate $ elements [OneWay, TwoWay]
+            _ <- updateKey ctx req
+            d1 <- recvData ctx
+            d2 <- recvData ctx
+            writeChan queue [d0,d1,d2]
+            bye ctx
+        tlsClient queue ctx = do
+            handshake ctx
+            d0 <- readChan queue
+            sendData ctx (L.fromChunks [d0])
+            d1 <- readChan queue
+            sendData ctx (L.fromChunks [d1])
+            req <- generate $ elements [OneWay, TwoWay]
+            _ <- updateKey ctx req
+            d2 <- readChan queue
+            sendData ctx (L.fromChunks [d2])
+            byeBye ctx
+
+runTLSInitFailureGen :: (ClientParams, ServerParams) -> (Context -> IO s) -> (Context -> IO c) -> PropertyM IO ()
+runTLSInitFailureGen params hsServer hsClient = do
     (cRes, sRes) <- run (initiateDataPipe params tlsServer tlsClient)
     assertIsLeft cRes
     assertIsLeft sRes
-  where tlsServer ctx = handshake ctx >> bye ctx >> return ("server success" :: String)
-        tlsClient ctx = handshake ctx >> bye ctx >> return ("client success" :: String)
+  where tlsServer ctx = do
+            _ <- hsServer ctx
+            minfo <- contextGetInformation ctx
+            byeBye ctx
+            return $ "server success: " ++ show minfo
+        tlsClient ctx = do
+            _ <- hsClient ctx
+            minfo <- contextGetInformation ctx
+            byeBye ctx
+            return $ "client success: " ++ show minfo
+
+runTLSInitFailure :: (ClientParams, ServerParams) -> PropertyM IO ()
+runTLSInitFailure params = runTLSInitFailureGen params handshake handshake
 
 prop_handshake_initiate :: PropertyM IO ()
 prop_handshake_initiate = do
     params  <- pick arbitraryPairParams
     runTLSPipeSimple params
 
+prop_handshake13_initiate :: PropertyM IO ()
+prop_handshake13_initiate = do
+    params  <- pick arbitraryPairParams13
+    let cgrps = supportedGroups $ clientSupported $ fst params
+        sgrps = supportedGroups $ serverSupported $ snd params
+        hs = if head cgrps `elem` sgrps then FullHandshake else HelloRetryRequest
+    runTLSPipeSimple13 params hs Nothing
+
+prop_handshake_keyupdate :: PropertyM IO ()
+prop_handshake_keyupdate = do
+    params <- pick arbitraryPairParams
+    runTLSPipeSimpleKeyUpdate params
+
+prop_handshake13_downgrade :: PropertyM IO ()
+prop_handshake13_downgrade = do
+    (cparam,sparam) <- pick arbitraryPairParams
+    versionForced <- pick $ elements (supportedVersions $ clientSupported cparam)
+    let debug' = (serverDebug sparam) { debugVersionForced = Just versionForced }
+        sparam' = sparam { serverDebug = debug' }
+        params = (cparam,sparam')
+        downgraded = (isVersionEnabled TLS13 params && versionForced < TLS13) ||
+                     (isVersionEnabled TLS12 params && versionForced < TLS12)
+    if downgraded
+        then runTLSInitFailure params
+        else runTLSPipeSimple params
+
+prop_handshake13_full :: PropertyM IO ()
+prop_handshake13_full = do
+    (cli, srv) <- pick arbitraryPairParams13
+    let cliSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [X25519]
+          }
+        svrSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [X25519]
+          }
+        params = (cli { clientSupported = cliSupported }
+                 ,srv { serverSupported = svrSupported }
+                 )
+    runTLSPipeSimple13 params FullHandshake Nothing
+
+prop_handshake13_hrr :: PropertyM IO ()
+prop_handshake13_hrr = do
+    (cli, srv) <- pick arbitraryPairParams13
+    let cliSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [P256,X25519]
+          }
+        svrSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [X25519]
+          }
+        params = (cli { clientSupported = cliSupported }
+                 ,srv { serverSupported = svrSupported }
+                 )
+    runTLSPipeSimple13 params HelloRetryRequest Nothing
+
+prop_handshake13_psk :: PropertyM IO ()
+prop_handshake13_psk = do
+    (cli, srv) <- pick arbitraryPairParams13
+    let cliSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [P256,X25519]
+          }
+        svrSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [X25519]
+          }
+        params0 = (cli { clientSupported = cliSupported }
+                  ,srv { serverSupported = svrSupported }
+                  )
+
+    sessionRefs <- run twoSessionRefs
+    let sessionManagers = twoSessionManagers sessionRefs
+
+    let params = setPairParamsSessionManagers sessionManagers params0
+
+    runTLSPipeSimple13 params HelloRetryRequest Nothing
+
+    -- and resume
+    sessionParams <- run $ readClientSessionRef sessionRefs
+    assert (isJust sessionParams)
+    let params2 = setPairParamsSessionResuming (fromJust sessionParams) params
+
+    runTLSPipeSimple13 params2 PreSharedKey Nothing
+
+prop_handshake13_psk_fallback :: PropertyM IO ()
+prop_handshake13_psk_fallback = do
+    (cli, srv) <- pick arbitraryPairParams13
+    let cliSupported = def
+            { supportedVersions = [TLS13]
+            , supportedCiphers = [ cipher_TLS13_AES128GCM_SHA256
+                                 , cipher_TLS13_AES128CCM_SHA256
+                                 ]
+            , supportedGroups = [P256,X25519]
+            }
+        svrSupported = def
+            { supportedVersions = [TLS13]
+            , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+            , supportedGroups = [X25519]
+            }
+        params0 = (cli { clientSupported = cliSupported }
+                  ,srv { serverSupported = svrSupported }
+                  )
+
+    sessionRefs <- run twoSessionRefs
+    let sessionManagers = twoSessionManagers sessionRefs
+
+    let params = setPairParamsSessionManagers sessionManagers params0
+
+    runTLSPipeSimple13 params HelloRetryRequest Nothing
+
+    -- resumption fails because GCM cipher is not supported anymore, full
+    -- handshake is not possible because X25519 has been removed, so we are
+    -- back with P256 after hello retry
+    sessionParams <- run $ readClientSessionRef sessionRefs
+    assert (isJust sessionParams)
+    let (cli2, srv2) = setPairParamsSessionResuming (fromJust sessionParams) params
+        srv2' = srv2 { serverSupported = svrSupported' }
+        svrSupported' = def
+            { supportedVersions = [TLS13]
+            , supportedCiphers = [cipher_TLS13_AES128CCM_SHA256]
+            , supportedGroups = [P256]
+            }
+
+    runTLSPipeSimple13 (cli2, srv2') HelloRetryRequest Nothing
+
+prop_handshake13_rtt0 :: PropertyM IO ()
+prop_handshake13_rtt0 = do
+    (cli, srv) <- pick arbitraryPairParams13
+    let cliSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [P256,X25519]
+          }
+        svrSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [X25519]
+          }
+        params0 = (cli { clientSupported = cliSupported }
+                  ,srv { serverSupported = svrSupported
+                       , serverEarlyDataSize = 2048 }
+                  )
+
+    sessionRefs <- run twoSessionRefs
+    let sessionManagers = twoSessionManagers sessionRefs
+
+    let params = setPairParamsSessionManagers sessionManagers params0
+
+    runTLSPipeSimple13 params HelloRetryRequest Nothing
+
+    -- and resume
+    sessionParams <- run $ readClientSessionRef sessionRefs
+    assert (isJust sessionParams)
+    earlyData <- B.pack <$> pick (someWords8 256)
+    let (pc,ps) = setPairParamsSessionResuming (fromJust sessionParams) params
+        params2 = (pc { clientEarlyData = Just earlyData } , ps)
+
+    runTLSPipeSimple13 params2 RTT0 (Just earlyData)
+
+prop_handshake13_rtt0_fallback :: PropertyM IO ()
+prop_handshake13_rtt0_fallback = do
+    ticketSize <- pick $ choose (0, 512)
+    (cli, srv) <- pick arbitraryPairParams13
+    group0 <- pick $ elements [P256,X25519]
+    let cliSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [P256,X25519]
+          }
+        svrSupported = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [group0]
+          }
+        params0 = (cli { clientSupported = cliSupported }
+                  ,srv { serverSupported = svrSupported
+                       , serverEarlyDataSize = ticketSize }
+                  )
+
+    sessionRefs <- run twoSessionRefs
+    let sessionManagers = twoSessionManagers sessionRefs
+
+    let params = setPairParamsSessionManagers sessionManagers params0
+
+    let mode = if group0 == P256 then FullHandshake else HelloRetryRequest
+    runTLSPipeSimple13 params mode Nothing
+
+    -- and resume
+    sessionParams <- run $ readClientSessionRef sessionRefs
+    assert (isJust sessionParams)
+    earlyData <- B.pack <$> pick (someWords8 256)
+    group2 <- pick $ elements [P256,X25519]
+    let (pc,ps) = setPairParamsSessionResuming (fromJust sessionParams) params
+        svrSupported2 = def {
+            supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [group2]
+          }
+        params2 = (pc { clientEarlyData = Just earlyData }
+                  ,ps { serverEarlyDataSize = 0
+                      , serverSupported = svrSupported2
+                      }
+                  )
+
+    let mode2 = if ticketSize < 256 then PreSharedKey else RTT0
+    runTLSPipeSimple13 params2 mode2 Nothing
+
+prop_handshake13_rtt0_length :: PropertyM IO ()
+prop_handshake13_rtt0_length = do
+    serverMax <- pick $ choose (0, 33792)
+    (cli, srv) <- pick arbitraryPairParams13
+    let cliSupported = def
+          { supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [X25519]
+          }
+        svrSupported = def
+          { supportedVersions = [TLS13]
+          , supportedCiphers = [cipher_TLS13_AES128GCM_SHA256]
+          , supportedGroups = [X25519]
+          }
+        params0 = (cli { clientSupported = cliSupported }
+                  ,srv { serverSupported = svrSupported
+                       , serverEarlyDataSize = serverMax }
+                  )
+
+    sessionRefs <- run twoSessionRefs
+    let sessionManagers = twoSessionManagers sessionRefs
+    let params = setPairParamsSessionManagers sessionManagers params0
+    runTLSPipeSimple13 params FullHandshake Nothing
+
+    -- and resume
+    sessionParams <- run $ readClientSessionRef sessionRefs
+    assert (isJust sessionParams)
+    clientLen <- pick $ choose (0, 33792)
+    earlyData <- B.pack <$> pick (someWords8 clientLen)
+    let (pc,ps) = setPairParamsSessionResuming (fromJust sessionParams) params
+        params2 = (pc { clientEarlyData = Just earlyData } , ps)
+        (mode, mEarlyData)
+            | clientLen > serverMax = (PreSharedKey, Nothing)
+            | otherwise             = (RTT0, Just earlyData)
+    runTLSPipeSimple13 params2 mode mEarlyData
+
 prop_handshake_ciphersuites :: PropertyM IO ()
 prop_handshake_ciphersuites = do
-    let clientVersions = [TLS12]
-        serverVersions = [TLS12]
+    tls13 <- pick arbitrary
+    let version = if tls13 then TLS13 else TLS12
     clientCiphers <- pick arbitraryCiphers
     serverCiphers <- pick arbitraryCiphers
     (clientParam,serverParam) <- pick $ arbitraryPairParamsWithVersionsAndCiphers
-                                            (clientVersions, serverVersions)
+                                            ([version], [version])
                                             (clientCiphers, serverCiphers)
-    let shouldFail = null (clientCiphers `intersect` serverCiphers)
-    if shouldFail
-        then runTLSInitFailure (clientParam,serverParam)
-        else runTLSPipeSimple  (clientParam,serverParam)
+    let adequate = cipherAllowedForVersion version
+        shouldSucceed = any adequate (clientCiphers `intersect` serverCiphers)
+    if shouldSucceed
+        then runTLSPipeSimple  (clientParam,serverParam)
+        else runTLSInitFailure (clientParam,serverParam)
 
 prop_handshake_hashsignatures :: PropertyM IO ()
 prop_handshake_hashsignatures = do
-    let clientVersions = [TLS12]
-        serverVersions = [TLS12]
+    tls13 <- pick arbitrary
+    let version = if tls13 then TLS13 else TLS12
         ciphers = [ cipher_ECDHE_RSA_AES256GCM_SHA384
+                  , cipher_ECDHE_ECDSA_AES256GCM_SHA384
                   , cipher_ECDHE_RSA_AES128CBC_SHA
+                  , cipher_ECDHE_ECDSA_AES128CBC_SHA
                   , cipher_DHE_RSA_AES128_SHA1
                   , cipher_DHE_DSS_AES128_SHA1
+                  , cipher_TLS13_AES128GCM_SHA256
                   ]
     (clientParam,serverParam) <- pick $ arbitraryPairParamsWithVersionsAndCiphers
-                                            (clientVersions, serverVersions)
+                                            ([version], [version])
                                             (ciphers, ciphers)
-    clientHashSigs <- pick arbitraryHashSignatures
-    serverHashSigs <- pick arbitraryHashSignatures
+    clientHashSigs <- pick $ arbitraryHashSignatures version
+    serverHashSigs <- pick $ arbitraryHashSignatures version
     let clientParam' = clientParam { clientSupported = (clientSupported clientParam)
                                        { supportedHashSignatures = clientHashSigs }
                                    }
@@ -159,22 +491,62 @@ prop_handshake_cert_fallback = do
     runTLSPipeSimple (clientParam',serverParam)
     serverChain <- run $ readIORef chainRef
     dssDisallowed `assertEq` isLeafRSA serverChain
-  where
-    isLeafRSA chain = case chain >>= leafPublicKey of
-                          Just (PubKeyRSA _) -> True
-                          _                  -> False
+
+-- Same as above but testing with supportedHashSignatures directly instead of
+-- ciphers, and thus allowing TLS13.  Peers accept RSA with SHA-256 but the
+-- server RSA certificate has a SHA-1 signature.  When Ed25519 is allowed by
+-- both client and server, the Ed25519 certificate is selected.  Otherwise the
+-- server fallbacks to RSA.
+--
+-- Note: SHA-1 is supposed to be disallowed in X.509 signatures with TLS13
+-- unless client advertises explicit support.  Currently this is not enforced by
+-- the library, which is useful to test this scenario.  SHA-1 could be replaced
+-- by another algorithm.
+prop_handshake_cert_fallback_hs :: PropertyM IO ()
+prop_handshake_cert_fallback_hs = do
+    tls13 <- pick arbitrary
+    let versions = if tls13 then [TLS13] else [TLS12]
+        ciphers  = [ cipher_ECDHE_RSA_AES128GCM_SHA256
+                   , cipher_ECDHE_ECDSA_AES128GCM_SHA256
+                   , cipher_TLS13_AES128GCM_SHA256
+                   ]
+        commonHS = [ (HashSHA256, SignatureRSA)
+                   , (HashIntrinsic, SignatureRSApssRSAeSHA256)
+                   ]
+        otherHS  = [ (HashIntrinsic, SignatureEd25519) ]
+    chainRef <- run $ newIORef Nothing
+    clientHS <- pick $ sublistOf otherHS
+    serverHS <- pick $ sublistOf otherHS
+    (clientParam,serverParam) <- pick $ arbitraryPairParamsWithVersionsAndCiphers
+                                            (versions, versions)
+                                            (ciphers, ciphers)
+    let clientParam' = clientParam { clientSupported = (clientSupported clientParam)
+                                       { supportedHashSignatures = commonHS ++ clientHS }
+                                   , clientHooks = (clientHooks clientParam)
+                                       { onServerCertificate = \_ _ _ chain ->
+                                             writeIORef chainRef (Just chain) >> return [] }
+                                   }
+        serverParam' = serverParam { serverSupported = (serverSupported serverParam)
+                                       { supportedHashSignatures = commonHS ++ serverHS }
+                                   }
+        eddsaDisallowed = (HashIntrinsic, SignatureEd25519) `notElem` clientHS
+                              || (HashIntrinsic, SignatureEd25519) `notElem` serverHS
+    runTLSPipeSimple (clientParam',serverParam')
+    serverChain <- run $ readIORef chainRef
+    eddsaDisallowed `assertEq` isLeafRSA serverChain
 
 prop_handshake_groups :: PropertyM IO ()
 prop_handshake_groups = do
-    let clientVersions = [TLS12]
-        serverVersions = [TLS12]
+    tls13 <- pick arbitrary
+    let versions = if tls13 then [TLS13] else [TLS12]
         ciphers = [ cipher_ECDHE_RSA_AES256GCM_SHA384
                   , cipher_ECDHE_RSA_AES128CBC_SHA
                   , cipher_DHE_RSA_AES256GCM_SHA384
                   , cipher_DHE_RSA_AES128_SHA1
+                  , cipher_TLS13_AES128GCM_SHA256
                   ]
     (clientParam,serverParam) <- pick $ arbitraryPairParamsWithVersionsAndCiphers
-                                            (clientVersions, serverVersions)
+                                            (versions, versions)
                                             (ciphers, ciphers)
     clientGroups <- pick arbitraryGroups
     serverGroups <- pick arbitraryGroups
@@ -189,15 +561,67 @@ prop_handshake_groups = do
                                        { supportedGroups = serverGroups }
                                    }
         isCustom = maybe True isCustomDHParams (serverDHEParams serverParam')
-        shouldFail = null (clientGroups `intersect` serverGroups) && isCustom && denyCustom
+        mCustomGroup = serverDHEParams serverParam' >>= dhParamsGroup
+        isClientCustom = maybe True (`notElem` clientGroups) mCustomGroup
+        commonGroups = clientGroups `intersect` serverGroups
+        shouldFail = null commonGroups && (tls13 || isClientCustom && denyCustom)
+        p minfo = isNothing (minfo >>= infoNegotiatedGroup) == (null commonGroups && isCustom)
     if shouldFail
         then runTLSInitFailure (clientParam',serverParam')
-        else runTLSPipeSimple  (clientParam',serverParam')
+        else runTLSPipePredicate (clientParam',serverParam') p
+
+
+prop_handshake_dh :: PropertyM IO ()
+prop_handshake_dh = do
+    let clientVersions = [TLS12]
+        serverVersions = [TLS12]
+        ciphers = [ cipher_DHE_RSA_AES128_SHA1 ]
+    (clientParam,serverParam) <- pick $ arbitraryPairParamsWithVersionsAndCiphers
+                                            (clientVersions, serverVersions)
+                                            (ciphers, ciphers)
+    let clientParam' = clientParam { clientSupported = (clientSupported clientParam)
+                                       { supportedGroups = [] }
+                                   }
+    let check (dh,shouldFail) = do
+         let serverParam' = serverParam { serverDHEParams = Just dh }
+         if shouldFail
+             then runTLSInitFailure (clientParam',serverParam')
+             else runTLSPipeSimple  (clientParam',serverParam')
+    mapM_ check [(dhParams512,True)
+                ,(dhParams768,True)
+                ,(dhParams1024,False)]
+
+prop_handshake_srv_key_usage :: PropertyM IO ()
+prop_handshake_srv_key_usage = do
+    tls13 <- pick arbitrary
+    let versions = if tls13 then [TLS13] else [SSL3,TLS10,TLS11,TLS12]
+        ciphers = [ cipher_ECDHE_RSA_AES128CBC_SHA
+                  , cipher_TLS13_AES128GCM_SHA256
+                  , cipher_DHE_RSA_AES128_SHA1
+                  , cipher_AES256_SHA256
+                  ]
+    (clientParam,serverParam) <- pick $ arbitraryPairParamsWithVersionsAndCiphers
+                                            (versions, versions)
+                                            (ciphers, ciphers)
+    usageFlags <- pick arbitraryKeyUsage
+    cred <- pick $ arbitraryRSACredentialWithUsage usageFlags
+    let serverParam' = serverParam
+            { serverShared = (serverShared serverParam)
+                  { sharedCredentials = Credentials [cred]
+                  }
+            }
+        hasDS = KeyUsage_digitalSignature `elem` usageFlags
+        hasKE = KeyUsage_keyEncipherment  `elem` usageFlags
+        shouldSucceed = hasDS || (hasKE && not tls13)
+    if shouldSucceed
+        then runTLSPipeSimple  (clientParam,serverParam')
+        else runTLSInitFailure (clientParam,serverParam')
 
 prop_handshake_client_auth :: PropertyM IO ()
 prop_handshake_client_auth = do
     (clientParam,serverParam) <- pick arbitraryPairParams
-    cred <- pick arbitraryClientCredential
+    let version = maximum (supportedVersions $ serverSupported serverParam)
+    cred <- pick (arbitraryClientCredential version)
     let clientParam' = clientParam { clientHooks = (clientHooks clientParam)
                                        { onCertificateRequest = \_ -> return $ Just cred }
                                    }
@@ -205,10 +629,30 @@ prop_handshake_client_auth = do
                                    , serverHooks = (serverHooks serverParam)
                                         { onClientCertificate = validateChain cred }
                                    }
-    runTLSPipeSimple (clientParam',serverParam')
+    let shouldFail = version == TLS13 && isCredentialDSA cred
+    if shouldFail
+        then runTLSInitFailure (clientParam',serverParam')
+        else runTLSPipeSimple  (clientParam',serverParam')
   where validateChain cred chain
             | chain == fst cred = return CertificateUsageAccept
             | otherwise         = return (CertificateUsageReject CertificateRejectUnknownCA)
+
+prop_handshake_clt_key_usage :: PropertyM IO ()
+prop_handshake_clt_key_usage = do
+    (clientParam,serverParam) <- pick arbitraryPairParams
+    usageFlags <- pick arbitraryKeyUsage
+    cred <- pick $ arbitraryRSACredentialWithUsage usageFlags
+    let clientParam' = clientParam { clientHooks = (clientHooks clientParam)
+                                       { onCertificateRequest = \_ -> return $ Just cred }
+                                   }
+        serverParam' = serverParam { serverWantClientCert = True
+                                   , serverHooks = (serverHooks serverParam)
+                                        { onClientCertificate = \_ -> return CertificateUsageAccept }
+                                   }
+        shouldSucceed = KeyUsage_digitalSignature `elem` usageFlags
+    if shouldSucceed
+        then runTLSPipeSimple  (clientParam',serverParam')
+        else runTLSInitFailure (clientParam',serverParam')
 
 prop_handshake_alpn :: PropertyM IO ()
 prop_handshake_alpn = do
@@ -225,17 +669,16 @@ prop_handshake_alpn = do
             handshake ctx
             proto <- getNegotiatedProtocol ctx
             Just "h2" `assertEq` proto
-            d <- recvDataNonNull ctx
-            writeChan queue d
-            return ()
+            d <- recvData ctx
+            writeChan queue [d]
+            bye ctx
         tlsClient queue ctx = do
             handshake ctx
             proto <- getNegotiatedProtocol ctx
             Just "h2" `assertEq` proto
             d <- readChan queue
             sendData ctx (L.fromChunks [d])
-            bye ctx
-            return ()
+            byeBye ctx
         alpn xs
           | "h2"    `elem` xs = return "h2"
           | otherwise         = return "http/1.1"
@@ -252,61 +695,86 @@ prop_handshake_sni = do
             handshake ctx
             sni <- getClientSNI ctx
             Just serverName `assertEq` sni
-            d <- recvDataNonNull ctx
-            writeChan queue d
-            return ()
+            d <- recvData ctx
+            writeChan queue [d]
+            bye ctx
         tlsClient queue ctx = do
             handshake ctx
             d <- readChan queue
             sendData ctx (L.fromChunks [d])
-            bye ctx
-            return ()
+            byeBye ctx
         serverName = "haskell.org"
 
 prop_handshake_renegotiation :: PropertyM IO ()
 prop_handshake_renegotiation = do
+    renegDisabled <- pick arbitrary
     (cparams, sparams) <- pick arbitraryPairParams
     let sparams' = sparams {
             serverSupported = (serverSupported sparams) {
-                 supportedClientInitiatedRenegotiation = True
+                 supportedClientInitiatedRenegotiation = not renegDisabled
                }
           }
-    runTLSPipe (cparams, sparams') tlsServer tlsClient
+    if renegDisabled || isVersionEnabled TLS13 (cparams, sparams')
+        then runTLSInitFailureGen (cparams, sparams') hsServer hsClient
+        else runTLSPipe (cparams, sparams') tlsServer tlsClient
   where tlsServer ctx queue = do
-            handshake ctx
-            d <- recvDataNonNull ctx
-            writeChan queue d
-            return ()
+            hsServer ctx
+            d <- recvData ctx
+            writeChan queue [d]
+            bye ctx
         tlsClient queue ctx = do
-            handshake ctx
-            handshake ctx
+            hsClient ctx
             d <- readChan queue
             sendData ctx (L.fromChunks [d])
-            bye ctx
-            return ()
+            byeBye ctx
+        hsServer     = handshake
+        hsClient ctx = handshake ctx >> handshake ctx
 
 prop_handshake_session_resumption :: PropertyM IO ()
 prop_handshake_session_resumption = do
-    sessionRef <- run $ newIORef Nothing
-    let sessionManager = oneSessionManager sessionRef
+    sessionRefs <- run twoSessionRefs
+    let sessionManagers = twoSessionManagers sessionRefs
 
     plainParams <- pick arbitraryPairParams
-    let params = setPairParamsSessionManager sessionManager plainParams
+    let params = setPairParamsSessionManagers sessionManagers plainParams
 
     runTLSPipeSimple params
 
     -- and resume
-    sessionParams <- run $ readIORef sessionRef
+    sessionParams <- run $ readClientSessionRef sessionRefs
     assert (isJust sessionParams)
     let params2 = setPairParamsSessionResuming (fromJust sessionParams) params
 
     runTLSPipeSimple params2
 
+prop_thread_safety :: PropertyM IO ()
+prop_thread_safety = do
+    params  <- pick arbitraryPairParams
+    runTLSPipe params tlsServer tlsClient
+  where tlsServer ctx queue = do
+            handshake ctx
+            runReaderWriters ctx "client-value" "server-value"
+            d <- recvData ctx
+            writeChan queue [d]
+            bye ctx
+        tlsClient queue ctx = do
+            handshake ctx
+            runReaderWriters ctx "server-value" "client-value"
+            d <- readChan queue
+            sendData ctx (L.fromChunks [d])
+            byeBye ctx
+        runReaderWriters ctx r w =
+            -- run concurrently 10 readers and 10 writers on the same context
+            let workers = concat $ replicate 10 [reader ctx r, writer ctx w]
+             in runConcurrently $ traverse_ Concurrently workers
+        writer         = sendData
+        reader ctx val = do { bs <- recvData ctx; val `assertEq` bs }
+
 assertEq :: (Show a, Monad m, Eq a) => a -> a -> m ()
 assertEq expected got = unless (expected == got) $ error ("got " ++ show got ++ " but was expecting " ++ show expected)
 
 assertIsLeft :: (Show b, Monad m) => Either a b -> m ()
-assertIsLeft (Left  _) = return()
+assertIsLeft (Left  _) = return ()
 assertIsLeft (Right b) = error ("got " ++ show b ++ " but was expecting a failure")
 
 main :: IO ()
@@ -314,6 +782,7 @@ main = defaultMain $ testGroup "tls"
     [ tests_marshalling
     , tests_ciphers
     , tests_handshake
+    , tests_thread_safety
     ]
   where -- lowlevel tests to check the packet marshalling.
         tests_marshalling = testGroup "Marshalling"
@@ -327,13 +796,31 @@ main = defaultMain $ testGroup "tls"
         tests_handshake = testGroup "Handshakes"
             [ testProperty "Setup" (monadicIO prop_pipe_work)
             , testProperty "Initiation" (monadicIO prop_handshake_initiate)
+            , testProperty "Initiation 1.3" (monadicIO prop_handshake13_initiate)
+            , testProperty "Key update 1.3" (monadicIO prop_handshake_keyupdate)
+            , testProperty "Downgrade protection" (monadicIO prop_handshake13_downgrade)
             , testProperty "Hash and signatures" (monadicIO prop_handshake_hashsignatures)
             , testProperty "Cipher suites" (monadicIO prop_handshake_ciphersuites)
             , testProperty "Groups" (monadicIO prop_handshake_groups)
-            , testProperty "Certificate fallback" (monadicIO prop_handshake_cert_fallback)
+            , testProperty "Certificate fallback (ciphers)" (monadicIO prop_handshake_cert_fallback)
+            , testProperty "Certificate fallback (hash and signatures)" (monadicIO prop_handshake_cert_fallback_hs)
+            , testProperty "Server key usage" (monadicIO prop_handshake_srv_key_usage)
             , testProperty "Client authentication" (monadicIO prop_handshake_client_auth)
+            , testProperty "Client key usage" (monadicIO prop_handshake_clt_key_usage)
             , testProperty "ALPN" (monadicIO prop_handshake_alpn)
             , testProperty "SNI" (monadicIO prop_handshake_sni)
             , testProperty "Renegotiation" (monadicIO prop_handshake_renegotiation)
             , testProperty "Resumption" (monadicIO prop_handshake_session_resumption)
+            , testProperty "Custom DH" (monadicIO prop_handshake_dh)
+            , testProperty "TLS 1.3 Full" (monadicIO prop_handshake13_full)
+            , testProperty "TLS 1.3 HRR"  (monadicIO prop_handshake13_hrr)
+            , testProperty "TLS 1.3 PSK"  (monadicIO prop_handshake13_psk)
+            , testProperty "TLS 1.3 PSK -> HRR" (monadicIO prop_handshake13_psk_fallback)
+            , testProperty "TLS 1.3 RTT0" (monadicIO prop_handshake13_rtt0)
+            , testProperty "TLS 1.3 RTT0 -> PSK" (monadicIO prop_handshake13_rtt0_fallback)
+            , testProperty "TLS 1.3 RTT0 length" (monadicIO prop_handshake13_rtt0_length)
             ]
+
+        -- test concurrent reads and writes
+        tests_thread_safety = localOption (QuickCheckTests 10) $
+            testProperty "Thread safety" (monadicIO prop_thread_safety)

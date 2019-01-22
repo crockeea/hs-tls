@@ -14,6 +14,7 @@ module Network.TLS.Context
     -- * Context object and accessor
     , Context(..)
     , Hooks(..)
+    , Established(..)
     , ctxEOF
     , ctxHasSSLv2ClientHello
     , ctxDisableSSLv2ClientHello
@@ -60,6 +61,7 @@ module Network.TLS.Context
     , usingHState
     , getHState
     , getStateRNG
+    , tls13orLater
     ) where
 
 import Network.TLS.Backend
@@ -131,7 +133,7 @@ contextNew backend params = liftIO $ do
 
     stvar <- newMVar st
     eof   <- newIORef False
-    established <- newIORef False
+    established <- newIORef NotEstablished
     stats <- newIORef newMeasurement
     -- we enable the reception of SSLv2 ClientHello message only in the
     -- server context, where we might be dealing with an old/compat client.
@@ -141,6 +143,7 @@ contextNew backend params = liftIO $ do
     tx    <- newMVar newRecordState
     rx    <- newMVar newRecordState
     hs    <- newMVar Nothing
+    as    <- newIORef []
     lockWrite <- newMVar ()
     lockRead  <- newMVar ()
     lockState <- newMVar ()
@@ -164,6 +167,8 @@ contextNew backend params = liftIO $ do
             , ctxLockWrite        = lockWrite
             , ctxLockRead         = lockRead
             , ctxLockState        = lockState
+            , ctxPendingActions   = as
+            , ctxKeyLogger        = debugKeyLogger debug
             }
 
 -- | create a new context on an handle.
@@ -171,7 +176,7 @@ contextNewOnHandle :: (MonadIO m, TLSParams params)
                    => Handle -- ^ Handle of the connection.
                    -> params -- ^ Parameters of the context.
                    -> m Context
-contextNewOnHandle handle params = contextNew handle params
+contextNewOnHandle = contextNew
 {-# DEPRECATED contextNewOnHandle "use contextNew" #-}
 
 #ifdef INCLUDE_NETWORK

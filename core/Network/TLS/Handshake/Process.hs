@@ -9,6 +9,7 @@
 --
 module Network.TLS.Handshake.Process
     ( processHandshake
+    , processHandshake13
     , startHandshake
     , getHandshakeDigest
     ) where
@@ -22,14 +23,19 @@ import Network.TLS.Util
 import Network.TLS.Packet
 import Network.TLS.ErrT
 import Network.TLS.Struct
+import Network.TLS.Struct13
 import Network.TLS.State
 import Network.TLS.Context.Internal
 import Network.TLS.Crypto
 import Network.TLS.Imports
+import Network.TLS.Handshake.Random
+import Network.TLS.Handshake.Signature
 import Network.TLS.Handshake.State
+import Network.TLS.Handshake.State13
 import Network.TLS.Handshake.Key
 import Network.TLS.Extension
 import Network.TLS.Parameters
+import Network.TLS.Sending13
 import Data.X509 (CertificateChain(..), Certificate(..), getCertificate)
 
 processHandshake :: Context -> Handshake -> IO ()
@@ -42,13 +48,15 @@ processHandshake ctx hs = do
             -- TLS_EMPTY_RENEGOTIATION_INFO_SCSV: {0x00, 0xFF}
             when (secureRenegotiation && (0xff `elem` cids)) $
                 usingState_ ctx $ setSecureRenegotiation True
-            startHandshake ctx cver ran
+            hrr <- usingState_ ctx getTLS13HRR
+            unless hrr $ startHandshake ctx cver ran
         Certificates certs            -> processCertificates role certs
         ClientKeyXchg content         -> when (role == ServerRole) $ do
             processClientKeyXchg ctx content
         Finished fdata                -> processClientFinished ctx fdata
         _                             -> return ()
     let encoded = encodeHandshake hs
+    when (isHRR hs) $ usingHState ctx wrapAsMessageHash13
     when (certVerifyHandshakeMaterial hs) $ usingHState ctx $ addHandshakeMessage encoded
     when (finishHandshakeTypeMaterial $ typeOfHandshake hs) $ usingHState ctx $ updateHandshakeDigest encoded
   where secureRenegotiation = supportedSecureRenegotiation $ ctxSupported ctx
@@ -71,6 +79,12 @@ processHandshake ctx hs = do
             usingHState ctx $ setPublicKey pubkey
           where pubkey = certPubKey $ getCertificate c
 
+        isHRR (ServerHello TLS12 srand _ _ _ _) = isHelloRetryRequest srand
+        isHRR _                                 = False
+
+processHandshake13 :: Context -> Handshake13 -> IO ()
+processHandshake13 = updateHandshake13
+
 -- process the client key exchange message. the protocol expects the initial
 -- client version received in ClientHello, not the negotiated version.
 -- in case the version mismatch, generate a random master secret
@@ -79,7 +93,7 @@ processClientKeyXchg ctx (CKX_RSA encryptedPremaster) = do
     (rver, role, random) <- usingState_ ctx $ do
         (,,) <$> getVersion <*> isClientContext <*> genRandom 48
     ePremaster <- decryptRSA ctx encryptedPremaster
-    usingHState ctx $ do
+    masterSecret <- usingHState ctx $ do
         expectedVer <- gets hstClientVersion
         case ePremaster of
             Left _          -> setMasterSecretFromPre rver role random
@@ -88,6 +102,8 @@ processClientKeyXchg ctx (CKX_RSA encryptedPremaster) = do
                 Right (ver, _)
                     | ver /= expectedVer -> setMasterSecretFromPre rver role random
                     | otherwise          -> setMasterSecretFromPre rver role premaster
+    liftIO $ logKey ctx (MasterSecret masterSecret)
+
 processClientKeyXchg ctx (CKX_DH clientDHValue) = do
     rver <- usingState_ ctx getVersion
     role <- usingState_ ctx isClientContext
@@ -99,27 +115,28 @@ processClientKeyXchg ctx (CKX_DH clientDHValue) = do
 
     dhpriv       <- usingHState ctx getDHPrivate
     let premaster = dhGetShared params dhpriv clientDHValue
-    usingHState ctx $ setMasterSecretFromPre rver role premaster
+    masterSecret <- usingHState ctx $ setMasterSecretFromPre rver role premaster
+    liftIO $ logKey ctx (MasterSecret masterSecret)
 
 processClientKeyXchg ctx (CKX_ECDH bytes) = do
     ServerECDHParams grp _ <- usingHState ctx getServerECDHParams
     case decodeGroupPublic grp bytes of
       Left _ -> throwCore $ Error_Protocol ("client public key cannot be decoded", True, HandshakeFailure)
       Right clipub -> do
-          srvpri <- usingHState ctx getECDHPrivate
+          srvpri <- usingHState ctx getGroupPrivate
           case groupGetShared clipub srvpri of
               Just premaster -> do
                   rver <- usingState_ ctx getVersion
                   role <- usingState_ ctx isClientContext
-                  usingHState ctx $ setMasterSecretFromPre rver role premaster
-              Nothing -> throwCore $ Error_Protocol ("cannote generate a shared secret on ECDH", True, HandshakeFailure)
+                  masterSecret <- usingHState ctx $ setMasterSecretFromPre rver role premaster
+                  liftIO $ logKey ctx (MasterSecret masterSecret)
+              Nothing -> throwCore $ Error_Protocol ("cannot generate a shared secret on ECDH", True, HandshakeFailure)
 
 processClientFinished :: Context -> FinishedData -> IO ()
 processClientFinished ctx fdata = do
     (cc,ver) <- usingState_ ctx $ (,) <$> isClientContext <*> getVersion
     expected <- usingHState ctx $ getHandshakeDigest ver $ invertRole cc
-    when (expected /= fdata) $ do
-        throwCore $ Error_Protocol("bad record mac", True, BadRecordMac)
+    when (expected /= fdata) $ decryptError "cannot verify finished"
     usingState_ ctx $ updateVerifiedData ServerRole fdata
     return ()
 

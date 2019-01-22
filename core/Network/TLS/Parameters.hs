@@ -12,6 +12,8 @@ module Network.TLS.Parameters
     , CommonParams
     , DebugParams(..)
     , ClientHooks(..)
+    , OnCertificateRequest
+    , OnServerCertificate
     , ServerHooks(..)
     , Supported(..)
     , Shared(..)
@@ -53,12 +55,18 @@ data DebugParams = DebugParams
       -- | Add a way to print the seed that was randomly generated. re-using the same seed
       -- will reproduce the same randomness with 'debugSeed'
     , debugPrintSeed :: Seed -> IO ()
+      -- | Force to choose this version in the server side.
+    , debugVersionForced :: Maybe Version
+      -- | Printing master keys. The default is no printing.
+    , debugKeyLogger     :: String -> IO ()
     }
 
 defaultDebugParams :: DebugParams
 defaultDebugParams = DebugParams
     { debugSeed = Nothing
     , debugPrintSeed = const (return ())
+    , debugVersionForced = Nothing
+    , debugKeyLogger = \_ -> return ()
     }
 
 instance Show DebugParams where
@@ -89,6 +97,10 @@ data ClientParams = ClientParams
       -- of 'supportedCiphers' with a suitable cipherlist.
     , clientSupported                 :: Supported
     , clientDebug                     :: DebugParams
+      -- | Client tries to send this early data in TLS 1.3 if possible.
+      -- If not accepted by the server, it is application's responsibility
+      -- to re-sent it.
+    , clientEarlyData                 :: Maybe ByteString
     } deriving (Show)
 
 defaultParamsClient :: HostName -> ByteString -> ClientParams
@@ -101,6 +113,7 @@ defaultParamsClient serverName serverId = ClientParams
     , clientHooks                = def
     , clientSupported            = def
     , clientDebug                = defaultDebugParams
+    , clientEarlyData            = Nothing
     }
 
 data ServerParams = ServerParams
@@ -125,6 +138,9 @@ data ServerParams = ServerParams
     , serverHooks             :: ServerHooks
     , serverSupported         :: Supported
     , serverDebug             :: DebugParams
+      -- ^ Server accepts this size of early data in TLS 1.3.
+      -- 0 (or lower) means that the server does not accept early data.
+    , serverEarlyDataSize     :: Int
     } deriving (Show)
 
 defaultParamsServer :: ServerParams
@@ -136,6 +152,7 @@ defaultParamsServer = ServerParams
     , serverShared           = def
     , serverSupported        = def
     , serverDebug            = defaultDebugParams
+    , serverEarlyDataSize    = 0
     }
 
 instance Default ServerParams where
@@ -152,17 +169,26 @@ data Supported = Supported
       -- cipher list.  'Network.TLS.Extra.Cipher.ciphersuite_default' is often
       -- a good choice.
     , supportedCiphers        :: [Cipher]
-      -- | supported compressions methods
+      -- | Supported compressions methods.  By default only the "null"
+      -- compression is supported, which means no compression will be performed.
+      -- Allowing other compression method is not advised as it causes a
+      -- connection failure when TLS 1.3 is negotiated.
     , supportedCompressions   :: [Compression]
       -- | All supported hash/signature algorithms pair for client
       -- certificate verification and server signature in (EC)DHE,
       -- ordered by decreasing priority.
       --
-      -- This list is sent to the peer as part of the signature_algorithms
-      -- extension.  It is also used to restrict the choice of server
-      -- credential, signature and hash algorithm, but only when the TLS
-      -- version is 1.2 or above.  In order to disable SHA-1 one must then
+      -- This list is sent to the peer as part of the "signature_algorithms"
+      -- extension.  It is used to restrict accepted signatures received from
+      -- the peer at TLS level (not in X.509 certificates), but only when the
+      -- TLS version is 1.2 or above.  In order to disable SHA-1 one must then
       -- also disable earlier protocol versions in 'supportedVersions'.
+      --
+      -- The list also impacts the selection of possible algorithms when
+      -- generating signatures.
+      --
+      -- Note: with TLS 1.3 some algorithms have been deprecated and will not be
+      -- used even when listed in the parameter: MD5, SHA-1, RSA PKCS#1, DSS.
     , supportedHashSignatures :: [HashAndSignatureAlgorithm]
       -- | Secure renegotiation defined in RFC5746.
       --   If 'True', clients send the renegotiation_info extension.
@@ -189,6 +215,11 @@ data Supported = Supported
     , supportedEmptyPacket         :: Bool
       -- | A list of supported elliptic curves and finite-field groups in the
       --   preferred order.
+      --
+      --   The list is sent to the server as part of the "supported_groups"
+      --   extension.  It is used in both clients and servers to restrict
+      --   accepted groups in DH key exchange.
+      --
       --   The default value is ['X25519','P256','P384','P521'].
       --   'X25519' and 'P256' provide 128-bit security which is strong
       --   enough until 2030.  Both curves are fast because their
@@ -201,10 +232,15 @@ defaultSupported = Supported
     { supportedVersions       = [TLS12,TLS11,TLS10]
     , supportedCiphers        = []
     , supportedCompressions   = [nullCompression]
-    , supportedHashSignatures = [ (Struct.HashSHA512, SignatureRSA)
+    , supportedHashSignatures = [ (HashIntrinsic,     SignatureRSApssRSAeSHA256)
+                                , (HashIntrinsic,     SignatureRSApssRSAeSHA384)
+                                , (HashIntrinsic,     SignatureRSApssRSAeSHA512)
+                                , (Struct.HashSHA512, SignatureRSA)
                                 , (Struct.HashSHA512, SignatureECDSA)
+                                , (Struct.HashIntrinsic, SignatureEd448)
                                 , (Struct.HashSHA384, SignatureRSA)
                                 , (Struct.HashSHA384, SignatureECDSA)
+                                , (Struct.HashIntrinsic, SignatureEd25519)
                                 , (Struct.HashSHA256, SignatureRSA)
                                 , (Struct.HashSHA256, SignatureECDSA)
                                 , (Struct.HashSHA1,   SignatureRSA)
@@ -221,10 +257,33 @@ defaultSupported = Supported
 instance Default Supported where
     def = defaultSupported
 
+-- | Parameters that are common to clients and servers.
 data Shared = Shared
-    { sharedCredentials     :: Credentials
+    { -- | The list of certificates and private keys that a server will use as
+      -- part of authentication to clients.  Actual credentials that are used
+      -- are selected dynamically from this list based on client capabilities.
+      -- Additional credentials returned by 'onServerNameIndication' are also
+      -- considered.
+      --
+      -- When credential list is left empty (the default value), no key
+      -- exchange can take place.
+      sharedCredentials     :: Credentials
+      -- | Callbacks used by clients and servers in order to resume TLS
+      -- sessions.  The default implementation never resumes sessions.  Package
+      -- <https://hackage.haskell.org/package/tls-session-manager tls-session-manager>
+      -- provides an in-memory implementation.
     , sharedSessionManager  :: SessionManager
+      -- | A collection of trust anchors to be used by a client as
+      -- part of validation of server certificates.  This is set as
+      -- first argument to function 'onServerCertificate'.  Package
+      -- <https://hackage.haskell.org/package/x509-system x509-system>
+      -- gives access to a default certificate store configured in the
+      -- system.
     , sharedCAStore         :: CertificateStore
+      -- | Callbacks that may be used by a client to cache certificate
+      -- validation results (positive or negative) and avoid expensive
+      -- signature check.  The default implementation does not have
+      -- any caching.
     , sharedValidationCache :: ValidationCache
     }
 
@@ -246,48 +305,106 @@ data GroupUsage =
         | GroupUsageInvalidPublic         -- ^ usage of group with an invalid public value
         deriving (Show,Eq)
 
-defaultGroupUsage :: DHParams -> DHPublic -> IO GroupUsage
-defaultGroupUsage params public
+defaultGroupUsage :: Int -> DHParams -> DHPublic -> IO GroupUsage
+defaultGroupUsage minBits params public
     | even $ dhParamsGetP params                   = return $ GroupUsageUnsupported "invalid odd prime"
     | not $ dhValid params (dhParamsGetG params)   = return $ GroupUsageUnsupported "invalid generator"
     | not $ dhValid params (dhUnwrapPublic public) = return   GroupUsageInvalidPublic
+    -- To prevent Logjam attack
+    | dhParamsGetBits params < minBits             = return   GroupUsageInsecure
     | otherwise                                    = return   GroupUsageValid
+
+-- | Type for 'onCertificateRequest'. This type synonym is to make
+--   document readable.
+type OnCertificateRequest = ([CertificateType],
+                             Maybe [HashAndSignatureAlgorithm],
+                             [DistinguishedName])
+                           -> IO (Maybe (CertificateChain, PrivKey))
+
+-- | Type for 'onServerCertificate'. This type synonym is to make
+--   document readable.
+type OnServerCertificate = CertificateStore -> ValidationCache -> ServiceID -> CertificateChain -> IO [FailedReason]
 
 -- | A set of callbacks run by the clients for various corners of TLS establishment
 data ClientHooks = ClientHooks
-    { -- | This action is called when the server sends a
-      -- certificate request.  The parameter is the information
-      -- from the request.  The action should select a certificate
-      -- chain of one of the given certificate types where the
-      -- last certificate in the chain should be signed by one of
-      -- the given distinguished names.  Each certificate should
-      -- be signed by the following one, except for the last.  At
-      -- least the first of the certificates in the chain must
-      -- have a corresponding private key, because that is used
-      -- for signing the certificate verify message.
+    { -- | This action is called when the a certificate request is
+      -- received from the server. The callback argument is the
+      -- information from the request.  The server, at its
+      -- discretion, may be willing to continue the handshake
+      -- without a client certificate.  Therefore, the callback is
+      -- free to return 'Nothing' to indicate that no client
+      -- certificate should be sent, despite the server's request.
+      -- In some cases it may be appropriate to get user consent
+      -- before sending the certificate; the content of the user's
+      -- certificate may be sensitive and intended only for
+      -- specific servers.
+      --
+      -- The action should select a certificate chain of one of
+      -- the given certificate types and one of the certificates
+      -- in the chain should (if possible) be signed by one of the
+      -- given distinguished names.  Some servers, that don't have
+      -- a narrow set of preferred issuer CAs, will send an empty
+      -- 'DistinguishedName' list, rather than send all the names
+      -- from their trusted CA bundle.  If the client does not
+      -- have a certificate chaining to a matching CA, it may
+      -- choose a default certificate instead.
+      --
+      -- Each certificate except the last should be signed by the
+      -- following one.  The returned private key must be for the
+      -- first certificates in the chain.  This key will be used
+      -- to signing the certificate verify message.
+      --
+      -- The public key in the first certificate, and the matching
+      -- returned private key must be compatible with one of the
+      -- list of 'HashAndSignatureAlgorithm' value when provided.
+      -- TLS 1.3 changes the meaning of the list elements, adding
+      -- explicit code points for each supported pair of hash and
+      -- signature (public key) algorithms, rather than combining
+      -- separate codes for the hash and key.  For details see
+      -- <https://tools.ietf.org/html/rfc8446#section-4.2.3 RFC 8446>
+      -- section 4.2.3.  When no compatible certificate chain is
+      -- available, return 'Nothing' if it is OK to continue
+      -- without a client certificate.  Returning a non-matching
+      -- certificate should result in a handshake failure.
+      --
+      -- While the TLS version is not provided to the callback,
+      -- the content of the @signature_algorithms@ list provides
+      -- a strong hint, since TLS 1.3 servers will generally list
+      -- RSA pairs with a hash component of 'Intrinsic' (@0x08@).
       --
       -- Note that is is the responsibility of this action to
       -- select a certificate matching one of the requested
-      -- certificate types.  Returning a non-matching one will
-      -- lead to handshake failure later.
-      --
-      -- Returning a certificate chain not matching the
-      -- distinguished names may lead to problems or not,
-      -- depending whether the server accepts it.
-      onCertificateRequest :: ([CertificateType],
-                               Maybe [HashAndSignatureAlgorithm],
-                               [DistinguishedName]) -> IO (Maybe (CertificateChain, PrivKey))
+      -- certificate types (public key algorithms).  Returning
+      -- a non-matching one will lead to handshake failure later.
+      onCertificateRequest :: OnCertificateRequest
       -- | Used by the client to validate the server certificate.  The default
       -- implementation calls 'validateDefault' which validates according to the
       -- default hooks and checks provided by "Data.X509.Validation".  This can
       -- be replaced with a custom validation function using different settings.
-    , onServerCertificate  :: CertificateStore -> ValidationCache -> ServiceID -> CertificateChain -> IO [FailedReason]
+      --
+      -- The function is not expected to verify the key-usage extension of the
+      -- end-entity certificate, as this depends on the dynamically-selected
+      -- cipher and this part should not be cached.  Key-usage verification
+      -- is performed by the library internally.
+    , onServerCertificate  :: OnServerCertificate
       -- | This action is called when the client sends ClientHello
       --   to determine ALPN values such as '["h2", "http/1.1"]'.
     , onSuggestALPN :: IO (Maybe [B.ByteString])
-      -- | This action is called to validate DHE parameters when
-      --   the server selected a finite-field group not part of
-      --   the "Supported Groups Registry".
+      -- | This action is called to validate DHE parameters when the server
+      --   selected a finite-field group not part of the "Supported Groups
+      --   Registry" or not part of 'supportedGroups' list.
+      --
+      --   With TLS 1.3 custom groups have been removed from the protocol, so
+      --   this callback is only used when the version negotiated is 1.2 or
+      --   below.
+      --
+      --   The default behavior with (dh_p, dh_g, dh_size) and pub as follows:
+      --
+      --   (1) rejecting if dh_p is even
+      --   (2) rejecting unless 1 < dh_g && dh_g < dh_p - 1
+      --   (3) rejecting unless 1 < dh_p && pub < dh_p - 1
+      --   (4) rejecting if dh_size < 1024 (to prevent Logjam attack)
+      --
       --   See RFC 7919 section 3.1 for recommandations.
     , onCustomFFDHEGroup :: DHParams -> DHPublic -> IO GroupUsage
     }
@@ -297,7 +414,7 @@ defaultClientHooks = ClientHooks
     { onCertificateRequest = \ _ -> return Nothing
     , onServerCertificate  = validateDefault
     , onSuggestALPN        = return Nothing
-    , onCustomFFDHEGroup   = defaultGroupUsage
+    , onCustomFFDHEGroup   = defaultGroupUsage 1024
     }
 
 instance Show ClientHooks where
@@ -311,6 +428,10 @@ data ServerHooks = ServerHooks
       -- | This action is called when a client certificate chain
       -- is received from the client.  When it returns a
       -- CertificateUsageReject value, the handshake is aborted.
+      --
+      -- The function is not expected to verify the key-usage
+      -- extension of the certificate.  This verification is
+      -- performed by the library internally.
       onClientCertificate :: CertificateChain -> IO CertificateUsage
 
       -- | This action is called when the client certificate

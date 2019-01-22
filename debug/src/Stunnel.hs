@@ -1,9 +1,7 @@
-{-# LANGUAGE DeriveDataTypeable #-}
 -- Disable this warning so we can still test deprecated functionality.
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
 
 import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar
 import Control.Exception (finally, throw, SomeException(..))
 import qualified Control.Exception as E
 import qualified Crypto.PubKey.DH as DH ()
@@ -12,12 +10,12 @@ import qualified Data.ByteString.Lazy as L
 import Data.Default.Class
 import Data.X509.Validation
 import Network.Socket hiding (Debug)
+import Network.TLS.SessionManager
 import System.Console.GetOpt
 import System.Environment (getArgs)
 import System.Exit
 import System.IO
 import System.IO.Error (isEOFError)
-import System.X509
 
 import Network.TLS
 import Network.TLS.Extra.Cipher
@@ -69,15 +67,7 @@ tlsserver srchandle dsthandle = do
         return False
     putStrLn "end"
 
-newtype MemSessionManager = MemSessionManager (MVar [(SessionID, SessionData)])
-
-memSessionManager (MemSessionManager mvar) = SessionManager
-    { sessionEstablish  = \sid sdata -> modifyMVar_ mvar (\l -> return $ (sid,sdata) : l)
-    , sessionResume     = \sid       -> withMVar mvar (return . lookup sid)
-    , sessionInvalidate = \_         -> return ()
-    }
-
-clientProcess dhParamsFile creds handle dsthandle dbg sessionStorage _ = do
+clientProcess dhParamsFile creds handle dsthandle dbg sessionManager _ = do
     let logging = if not dbg
             then def
             else def { loggingPacketSent = putStrLn . ("debug: send: " ++)
@@ -91,7 +81,7 @@ clientProcess dhParamsFile creds handle dsthandle dbg sessionStorage _ = do
     let serverstate = def
             { serverSupported = def { supportedCiphers = ciphersuite_default }
             , serverShared    = def { sharedCredentials = creds
-                                    , sharedSessionManager = maybe noSessionManager (memSessionManager . MemSessionManager) sessionStorage
+                                    , sharedSessionManager = sessionManager
                                     }
             , serverDHEParams = dhParams
             }
@@ -153,7 +143,7 @@ doClient source destination@(Address a _) flags = do
                          , loggingPacketRecv = putStrLn . ("debug: recv: " ++)
                          }
 
-    store <- getSystemCertificateStore
+    store <- getTrustAnchors flags
     let validateCache
            | NoCertValidation `elem` flags =
                 ValidationCache (\_ _ _ -> return ValidationCachePass)
@@ -198,7 +188,10 @@ doServer source destination flags = do
     dstaddr <- getAddressDescription destination
     let dhParamsFile = getDHParams flags
 
-    sessionStorage <- if NoSession `elem` flags then return Nothing else (Just `fmap` newMVar [])
+    sessionManager <-
+        if NoSession `elem` flags
+            then return noSessionManager
+            else newSessionManager defaultConfig
 
     case srcaddr of
         AddrSocket _ _ -> do
@@ -212,7 +205,7 @@ doServer source destination flags = do
                     StunnelSocket dst -> socketToHandle dst ReadWriteMode
 
                 _ <- forkIO $ finally
-                    (clientProcess dhParamsFile creds srch dsth (Debug `elem` flags) sessionStorage addr >> return ())
+                    (clientProcess dhParamsFile creds srch dsth (Debug `elem` flags) sessionManager addr >> return ())
                     (hClose srch >> (when (dsth /= stdout) $ hClose dsth))
                 return ()
         AddrFD _ _ -> error "bad error fd. not implemented"
@@ -233,6 +226,7 @@ data Flag =
     | DHParams String
     | NoSession
     | NoCertValidation
+    | TrustAnchor String
     deriving (Show,Eq)
 
 options :: [OptDescr Flag]
@@ -249,6 +243,7 @@ options =
     , Option []     ["dhparams"] (ReqArg DHParams "dhparams") "DH parameters (name or file)"
     , Option []     ["no-session"] (NoArg NoSession) "disable support for session"
     , Option []     ["no-cert-validation"] (NoArg NoCertValidation) "disable certificate validation"
+    , Option []     ["trust-anchor"] (ReqArg TrustAnchor "pem-or-dir") "use provided CAs instead of system certificate store"
     ]
 
 data Address = Address String String
@@ -278,6 +273,10 @@ getCertificate opts = reverse $ onNull ["certificate.pem"] $ foldl accf [] opts
 getKey opts = reverse $ onNull ["certificate.key"] $ foldl accf [] opts
   where accf acc (Key key) = key : acc
         accf acc _         = acc
+
+getTrustAnchors flags = getCertificateStore (foldr getPaths [] flags)
+  where getPaths (TrustAnchor path) acc = path : acc
+        getPaths _                  acc = acc
 
 getDHParams opts = foldl accf Nothing opts
   where accf _   (DHParams file) = Just file

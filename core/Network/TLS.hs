@@ -8,18 +8,50 @@
 --
 module Network.TLS
     (
+    -- * Basic APIs
+      contextNew
+    , handshake
+    , sendData
+    , recvData
+    , bye
+
+    -- * Backend abstraction
+    , HasBackend(..)
+    , Backend(..)
+
     -- * Context configuration
-      ClientParams(..)
-    , HostName
-    , Bytes
+    -- ** Parameters
+    , TLSParams
+    , ClientParams(..)
+    , defaultParamsClient
     , ServerParams(..)
+    -- ** Hooks
+    , ClientHooks(..)
+    , OnCertificateRequest
+    , OnServerCertificate
+    , ServerHooks(..)
+    -- ** Supported
+    , Supported(..)
+    -- ** Shared
+    , Shared(..)
+    -- ** Credentials
+    , Credentials(..)
+    , Credential
+    , credentialLoadX509
+    , credentialLoadX509FromMemory
+    , credentialLoadX509Chain
+    , credentialLoadX509ChainFromMemory
+    -- ** Session
+    , SessionID
+    , SessionData(..)
+    , SessionManager(..)
+    , noSessionManager
+    , TLS13TicketInfo
+    -- ** Misc
     , DebugParams(..)
+    , HostName
     , DHParams
     , DHPublic
-    , ClientHooks(..)
-    , ServerHooks(..)
-    , Supported(..)
-    , Shared(..)
     , Hooks(..)
     , Handshake
     , Logging(..)
@@ -27,39 +59,26 @@ module Network.TLS
     , GroupUsage(..)
     , CertificateUsage(..)
     , CertificateRejectReason(..)
-    , defaultParamsClient
     , MaxFragmentEnum(..)
     , HashAndSignatureAlgorithm
     , HashAlgorithm(..)
     , SignatureAlgorithm(..)
     , CertificateType(..)
 
-    -- * raw types
-    , ProtocolType(..)
-    , Header(..)
-
-    -- * Session
-    , SessionID
-    , SessionData(..)
-    , SessionManager(..)
-    , noSessionManager
+    -- * X509
+    -- ** X509 Validation
+    , ValidationChecks(..)
+    , ValidationHooks(..)
     , checkMasterSecret
 
-    -- * Backend abstraction
-    , Backend(..)
+    -- ** X509 Validation Cache
+    , ValidationCache(..)
+    , ValidationCacheResult(..)
+    , exceptionValidationCache
 
-    -- * Context object
+    -- * Context
     , Context
     , ctxConnection
-    , TLSParams
-    , HasBackend(..)
-
-    -- * Creating a context
-    , contextNew
-    , contextNewOnHandle
-#ifdef INCLUDE_NETWORK
-    , contextNewOnSocket
-#endif
     , contextFlush
     , contextClose
     , contextHookSetHandshakeRecv
@@ -67,71 +86,53 @@ module Network.TLS
     , contextHookSetLogging
     , contextModifyHooks
 
-    -- * Information gathering
+    -- ** Information gathering
     , Information(..)
+    , contextGetInformation
     , ClientRandom
     , ServerRandom
-
     , unClientRandom
     , unServerRandom
-    , contextGetInformation
 
-    -- * Credentials
-    , Credentials(..)
-    , Credential
-    , credentialLoadX509
-    , credentialLoadX509FromMemory
-    , credentialLoadX509Chain
-    , credentialLoadX509ChainFromMemory
-
-    -- * Initialisation and Termination of context
-    , bye
-    , handshake
-
-    -- * Application Layer Protocol Negotiation
+    -- ** Negotiated
     , getNegotiatedProtocol
-
-    -- * Server Name Indication
     , getClientSNI
+    -- ** Updating keys
+    , updateKey
+    , KeyUpdateRequest(..)
 
-    -- * High level API
-    , sendData
-    , recvData
+    -- * Raw types
+    , ProtocolType(..)
+    , Header(..)
     , recvAuthData
-    , recvData'
-
-    -- * Crypto Key
+    , Version(..)
+    -- ** Compressions & Predefined compressions
+    , module Network.TLS.Compression
+    -- ** Ciphers & Predefined ciphers
+    , module Network.TLS.Cipher
+    -- ** Crypto Key
     , PubKey(..)
     , PrivKey(..)
+    -- ** TLS 1.3
+    , Group(..)
+    , HandshakeMode13(..)
 
-    -- * Compressions & Predefined compressions
-    , module Network.TLS.Compression
-
-    -- * Ciphers & Predefined ciphers
-    , module Network.TLS.Cipher
-
-    -- * Versions
-    , Version(..)
-
-    -- * Errors
+    -- * Errors and exceptions
+    -- ** Errors
     , TLSError(..)
     , KxError(..)
     , AlertDescription(..)
 
-    -- * Exceptions
+    -- ** Exceptions
     , TLSException(..)
 
-    -- * X509 Validation
-    , ValidationChecks(..)
-    , ValidationHooks(..)
-
-    -- * X509 Validation Cache
-    , ValidationCache(..)
-    , ValidationCacheResult(..)
-    , exceptionValidationCache
-
-    -- * Key exchange group
-    , Group(..)
+    -- * Deprecated
+    , recvData'
+    , contextNewOnHandle
+#ifdef INCLUDE_NETWORK
+    , contextNewOnSocket
+#endif
+    , Bytes
     ) where
 
 import Network.TLS.Backend (Backend(..), HasBackend(..))
@@ -153,6 +154,7 @@ import Network.TLS.Core
 import Network.TLS.Session
 import Network.TLS.X509
 import Network.TLS.Types
+import Network.TLS.Handshake.State (HandshakeMode13(..))
 import Data.X509 (PubKey(..), PrivKey(..))
 import Data.X509.Validation
 import Data.ByteString as B

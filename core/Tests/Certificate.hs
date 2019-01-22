@@ -4,6 +4,8 @@
 module Certificate
     ( arbitraryX509
     , arbitraryX509WithKey
+    , arbitraryX509WithKeyAndUsage
+    , arbitraryKeyUsage
     , simpleCertificate
     , simpleX509
     ) where
@@ -44,12 +46,12 @@ instance Arbitrary DateTime where
 maxSerial :: Integer
 maxSerial = 16777216
 
-arbitraryCertificate :: PubKey -> Gen Certificate
-arbitraryCertificate pubKey = do
+arbitraryCertificate :: [ExtKeyUsageFlag] -> PubKey -> Gen Certificate
+arbitraryCertificate usageFlags pubKey = do
     serial    <- choose (0,maxSerial)
     subjectdn <- arbitraryDN
     validity  <- (,) <$> arbitrary <*> arbitrary
-    let sigalg = SignatureALG HashSHA1 (pubkeyToAlg pubKey)
+    let sigalg = getSignatureALG pubKey
     return $ Certificate
             { certVersion      = 3
             , certSerial       = serial
@@ -59,7 +61,7 @@ arbitraryCertificate pubKey = do
             , certValidity     = validity
             , certPubKey       = pubKey
             , certExtensions   = Extensions $ Just
-                [ extensionEncode True $ ExtKeyUsage [KeyUsage_digitalSignature,KeyUsage_keyEncipherment,KeyUsage_keyCertSign]
+                [ extensionEncode True $ ExtKeyUsage usageFlags
                 ]
             }
   where issuerdn = DistinguishedName [(getObjectID DnCommonName, "Root CA")]
@@ -69,7 +71,7 @@ simpleCertificate pubKey =
     Certificate
         { certVersion = 3
         , certSerial = 0
-        , certSignatureAlg = SignatureALG HashSHA1 (pubkeyToAlg pubKey)
+        , certSignatureAlg = getSignatureALG pubKey
         , certIssuerDN     = simpleDN
         , certSubjectDN    = simpleDN
         , certValidity     = (time1, time2)
@@ -83,18 +85,21 @@ simpleCertificate pubKey =
         simpleDN = DistinguishedName []
 
 simpleX509 :: PubKey -> SignedCertificate
-simpleX509 pubKey = do
+simpleX509 pubKey =
     let cert = simpleCertificate pubKey
         sig  = replicate 40 1
-        sigalg = SignatureALG HashSHA1 (pubkeyToAlg pubKey)
+        sigalg = getSignatureALG pubKey
         (signedExact, ()) = objectToSignedExact (\_ -> (B.pack sig,sigalg,())) cert
      in signedExact
 
 arbitraryX509WithKey :: (PubKey, t) -> Gen SignedCertificate
-arbitraryX509WithKey (pubKey, _) = do
-    cert <- arbitraryCertificate pubKey
+arbitraryX509WithKey = arbitraryX509WithKeyAndUsage knownKeyUsage
+
+arbitraryX509WithKeyAndUsage :: [ExtKeyUsageFlag] -> (PubKey, t) -> Gen SignedCertificate
+arbitraryX509WithKeyAndUsage usageFlags (pubKey, _) = do
+    cert <- arbitraryCertificate usageFlags pubKey
     sig  <- resize 40 $ listOf1 arbitrary
-    let sigalg = SignatureALG HashSHA1 (pubkeyToAlg pubKey)
+    let sigalg = getSignatureALG pubKey
     let (signedExact, ()) = objectToSignedExact (\(!(_)) -> (B.pack sig,sigalg,())) cert
     return signedExact
 
@@ -102,3 +107,20 @@ arbitraryX509 :: Gen SignedCertificate
 arbitraryX509 = do
     let (pubKey, privKey) = getGlobalRSAPair
     arbitraryX509WithKey (PubKeyRSA pubKey, PrivKeyRSA privKey)
+
+arbitraryKeyUsage :: Gen [ExtKeyUsageFlag]
+arbitraryKeyUsage = sublistOf knownKeyUsage
+
+knownKeyUsage :: [ExtKeyUsageFlag]
+knownKeyUsage = [ KeyUsage_digitalSignature
+                , KeyUsage_keyEncipherment
+                , KeyUsage_keyAgreement
+                ]
+
+getSignatureALG :: PubKey -> SignatureALG
+getSignatureALG (PubKeyRSA      _) = SignatureALG HashSHA1      PubKeyALG_RSA
+getSignatureALG (PubKeyDSA      _) = SignatureALG HashSHA1      PubKeyALG_DSA
+getSignatureALG (PubKeyEC       _) = SignatureALG HashSHA256    PubKeyALG_EC
+getSignatureALG (PubKeyEd25519  _) = SignatureALG_IntrinsicHash PubKeyALG_Ed25519
+getSignatureALG (PubKeyEd448    _) = SignatureALG_IntrinsicHash PubKeyALG_Ed448
+getSignatureALG pubKey             = error $ "getSignatureALG: unsupported public key: " ++ show pubKey
