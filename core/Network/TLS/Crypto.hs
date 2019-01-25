@@ -51,7 +51,7 @@ import qualified Crypto.PubKey.RSA as RSA
 import qualified Crypto.PubKey.RSA.PKCS15 as RSA
 import qualified Crypto.PubKey.RSA.PSS as PSS
 
-import Data.X509 (PrivKey(..), PubKey(..), PubKeyEC(..))
+import Data.X509 (PrivKey(..), PubKey(..), PubKeyEC(..), PrivKeyEC(..), SerializedPoint(..))
 import Data.X509.EC (ecPubKeyCurveName, unserializePoint)
 import Network.TLS.Crypto.DH
 import Network.TLS.Crypto.IES
@@ -77,7 +77,7 @@ findDigitalSignatureAlg keyPair =
     case keyPair of
         (PubKeyRSA     _, PrivKeyRSA      _)  -> Just DS_RSA
         (PubKeyDSA     _, PrivKeyDSA      _)  -> Just DS_DSS
-        --(PubKeyECDSA   _, PrivKeyECDSA    _)  -> Just DS_ECDSA
+        (PubKeyEC      _, PrivKeyEC       _)  -> Just DS_ECDSA
         (PubKeyEd25519 _, PrivKeyEd25519  _)  -> Just DS_Ed25519
         (PubKeyEd448   _, PrivKeyEd448    _)  -> Just DS_Ed448
         _                                     -> Nothing
@@ -277,6 +277,23 @@ kxSign (PrivKeyDSA pk) (PubKeyDSA _) DSSParams msg = do
     sign <- DSA.sign pk H.SHA1 msg
     return (Right $ encodeASN1' DER $ dsaSequence sign)
   where dsaSequence sign = [Start Sequence,IntVal (DSA.sign_r sign),IntVal (DSA.sign_s sign),End Sequence]
+kxSign (PrivKeyEC (PrivKeyEC_Named ecCurvePriv private_d))
+       (PubKeyEC (PubKeyEC_Named ecCurvePub (SerializedPoint bs)))
+       (ECDSAParams hashAlg) 
+       msg | ecCurvePriv == ecCurvePub = do
+           let ecPriv = ECDSA.PrivateKey (ECC.getCurveByName ecCurvePriv) private_d
+           sig <- case hashAlg of
+                          MD5      -> Just <$> ECDSA.sign ecPriv H.MD5 msg
+                          SHA1     -> Just <$> ECDSA.sign ecPriv H.SHA1 msg
+                          SHA224   -> Just <$> ECDSA.sign ecPriv H.SHA224 msg
+                          SHA256   -> Just <$> ECDSA.sign ecPriv H.SHA256 msg
+                          SHA384   -> Just <$> ECDSA.sign ecPriv H.SHA384 msg
+                          SHA512   -> Just <$> ECDSA.sign ecPriv H.SHA512 msg
+                          SHA1_MD5 -> return Nothing
+           case sig of
+                Just (ECDSA.Signature r s) ->
+                    return $ Right $ encodeASN1' DER $ [Start Sequence,IntVal r,IntVal s,End Sequence]
+                Nothing -> return (Left KxUnsupported)
 kxSign (PrivKeyEd25519 pk) (PubKeyEd25519 pub) Ed25519Params msg =
     return $ Right $ B.convert $ Ed25519.sign pk pub msg
 kxSign (PrivKeyEd448 pk) (PubKeyEd448 pub) Ed448Params msg =
