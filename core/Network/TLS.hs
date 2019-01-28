@@ -105,6 +105,7 @@ module Network.TLS
     -- * Raw types
     , ProtocolType(..)
     , Header(..)
+    , recvAuthData
     , Version(..)
     -- ** Compressions & Predefined compressions
     , module Network.TLS.Compression
