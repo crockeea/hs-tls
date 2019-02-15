@@ -241,6 +241,19 @@ handshakeServerWithTLS12 sparams ctx chosenVersion allCreds exts ciphers serverN
                                resultTuple = if cipherListCredentialFallback cltCiphers
                                                  then (allCreds, sigAllCreds, allCiphers)
                                                  else (cltCreds, sigCltCreds, cltCiphers)
+                               {-
+                               -- make this section monadic, then print away!
+                               print cHashSigs            -- [(HashSHA256,SignatureRSA)] -- comes from settings in Supported
+                               print sigAllCreds          -- [onecert]
+                               print allCiphers           -- []
+                               print possibleHashSigAlgs  -- [(HashSHA256,SignatureRSA)]
+                               print (allCreds == sigAllCreds)
+                               print $ getCiphers sparams allCreds sigAllCreds
+                               print $ ciphers
+                               print $ commonCiphers allCreds sigAllCreds
+                               print $ cipherKeyExchange <$> commonCiphers allCreds sigAllCreds
+                               print $ filter cipherAllowed $ commonCiphers allCreds sigAllCreds
+                               -}
                             in resultTuple
                   _     -> (allCreds, allCreds, selectCipher allCreds allCreds)
 
