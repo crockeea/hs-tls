@@ -63,6 +63,7 @@ newSession ctx
 handshakeTerminate :: Context -> IO ()
 handshakeTerminate ctx = do
     session <- usingState_ ctx getSession
+    printLn "Handshake"
     -- only callback the session established if we have a session
     case session of
         Session (Just sessionId) -> do
